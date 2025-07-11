@@ -3,10 +3,10 @@
 A graphical user interface (GUI) tool designed for viewing, navigating, and selecting images from panoptic segmentation datasets. It provides a set of features to streamline the process of curating image subsets for computer vision tasks.
 
 ## 🛠️ TODO
-
+- [ ] Add other datasets 
 - [ ] Check installation instructions (below raw version)
 - [ ] Add usage instructions
-- [ ] Add screenshots or demo GIF of the GUI tool
+- [ ] Add screenshots or demo GIF
 
 
 ## Environment Setup
@@ -54,4 +54,17 @@ Example `config.json`:
     "ann_file": "/path/to/VIPSeg/VIPSeg_720P/panoptic_gt_VIPSeg_val.json"
   }
 }
+```
+
+### How to Run
+
+After setting up your environment and configuring paths:
+
+```bash
+# Activate the conda environment
+conda activate ann_sel
+
+# Launch the main application
+python main.py
+```
 
