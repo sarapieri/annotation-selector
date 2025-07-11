@@ -1,0 +1,21 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# If using virtualenv or conda
+.env/
+.venv/
+env/
+venv/
+
+# Detectron2 or PyTorch build files (if any)
+build/
+dist/
+*.egg-info/
+
+# Ignore other 
+selected_annotations/
+detectron2/
+detectron2.zip
+
+config.json
