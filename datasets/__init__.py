@@ -1,5 +1,5 @@
 from .base_dataset import BaseDataset
-from .vipseg_dataset import VIPSegDataset
+from .panoptic_dataset import PanopticDataset
 
-__all__ = ["BaseDataset", "VIPSegDataset"]
+__all__ = ["BaseDataset", "PanopticDataset"]
 
