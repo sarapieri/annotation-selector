@@ -34,7 +34,7 @@ class AppState:
                 datasets[name] = PanopticDataset(name=name, **params)
 
         except FileNotFoundError:
-            print("Warning: config.json not found. Please create it from config.json.template and add your dataset paths.")
+            print("Warning: config.json not found. Please create it from config.json. template and add your dataset paths.")
             return {}
         except (json.JSONDecodeError, KeyError) as e:
             print(f"Warning: Could not parse config.json: {e}")
