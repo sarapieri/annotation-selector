@@ -214,8 +214,8 @@ class PanopticDataset(BaseDataset):
             seg_copy["isthing"] = is_thing
 
             # Create the label string with the correct global index for both UI and visualization
-            label_str = f"{len(id_to_label)}: {name}"
-            id_to_label.append(label_str)
+            label_str = f"{len(id_to_label)}"
+            id_to_label.append(f"{len(id_to_label)}: {name}")
 
             # Remap category_id for Visualizer
             if is_thing:
