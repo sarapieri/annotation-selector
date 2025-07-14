@@ -90,16 +90,13 @@ class AppState:
             if hasattr(self.dataset, 'file_list') and self.dataset.file_list:
                 # For video datasets, sort by video ID first, then by frame filename
                 # to match the order in the UI's tree view.
-                if getattr(self.dataset, "is_video_dataset", False):
-                    # Create a list of (video_id, filename) tuples for sorting
-                    sortable_list = [
-                        (self.dataset.video_map.get(fname, ""), fname)
-                        for fname in self.dataset.file_list
-                    ]
-                    # Sort by video_id (natural sort), then by filename (natural sort)
-                    sortable_list.sort(key=lambda x: (natural_sort_key(x[0]), natural_sort_key(x[1])))
-                    # Recreate the file_list in the new sorted order
-                    self.dataset.file_list = [fname for video_id, fname in sortable_list]
+                if self.dataset.is_video_dataset:
+                    # For video datasets, the frame_key is "video_id/fname".
+                    # We sort based on the video_id, then the filename.
+                    self.dataset.file_list.sort(key=lambda frame_key: (
+                        natural_sort_key(frame_key.split('/')[0]),      # Sort by video_id
+                        natural_sort_key(frame_key.split('/', 1)[1])  # Then by filename
+                    ))
                 else:
                     # For image datasets, just sort by filename
                     self.dataset.file_list.sort(key=natural_sort_key)

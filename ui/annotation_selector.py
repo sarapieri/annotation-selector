@@ -284,6 +284,23 @@ class AnnotationSelector(QMainWindow):
         """Set self.thread to None after it has been deleted."""
         self.thread = None
 
+    def _get_frame_key_from_item(self, item: QTreeWidgetItem) -> str:
+        """
+        Constructs the full, unique frame_key from a QTreeWidget item.
+        For video datasets, this is "video_id/filename".
+        For image datasets, this is just "filename".
+        """
+        if not item:
+            return ""
+
+        if self.state.dataset.is_video_dataset:
+            parent = item.parent()
+            if parent:
+                video_id = parent.text(0)
+                fname = item.text(0)
+                return f"{video_id}/{fname}"
+        return item.text(0)
+
     def select_current(self):
         self.state.selected_files.add(self.state.current_filename())
         self.refresh_file_list()
@@ -320,15 +337,19 @@ class AnnotationSelector(QMainWindow):
 
         if not fname:
             QMessageBox.critical(self, "Display Error", "No file is currently selected.")
-            raise RuntimeError("No current filename available.")
+            # Clear display and return instead of crashing
+            self.original_image.clear()
+            self.mask_image.clear()
+            self.label_panel.clear()
+            return
 
         if orig_img is None or orig_img.isNull():
             QMessageBox.critical(self, "Display Error", f"Original image not found or is invalid for: {fname}")
-            raise FileNotFoundError(f"Missing original image for {fname}")
+            return
 
         if mask_img is None or mask_img.isNull():
             QMessageBox.critical(self, "Display Error", f"Panoptic mask not found or is invalid for: {fname}")
-            raise FileNotFoundError(f"Missing mask image for {fname}")
+            return
 
         # Store the full mask and reset the selected label for the new image
         self.full_panoptic_mask = mask_img
@@ -393,23 +414,23 @@ class AnnotationSelector(QMainWindow):
 
         if is_video:
             video_groups = defaultdict(list)
-            for fname in self.state.dataset.file_list:
-                video_id = self.state.dataset.video_map.get(fname, "Uncategorized")
-                video_groups[video_id].append(fname)
+            for frame_key in self.state.dataset.file_list:
+                video_id, fname = frame_key.split('/', 1)
+                video_groups[video_id].append((fname, frame_key))
 
-            for video_id, fnames in sorted(video_groups.items(), key=lambda item: natural_sort_key(item[0])):
+            for video_id, frame_data in sorted(video_groups.items(), key=lambda item: natural_sort_key(item[0])):
                 parent = QTreeWidgetItem(self.file_list_widget, [video_id])
                 parent.setFlags(parent.flags() & ~Qt.ItemFlag.ItemIsUserCheckable) # Folders are not checkable
-                for fname in sorted(fnames, key=natural_sort_key):
+                for fname, frame_key in sorted(frame_data, key=lambda x: natural_sort_key(x[0])):
                     child = QTreeWidgetItem(parent, [fname])
                     child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                    child.setCheckState(0, Qt.CheckState.Checked if fname in self.state.selected_files else Qt.CheckState.Unchecked)
+                    child.setCheckState(0, Qt.CheckState.Checked if frame_key in self.state.selected_files else Qt.CheckState.Unchecked)
         else:
-            # Fallback for non-video datasets
-            for fname in self.state.dataset.file_list:
-                item = QTreeWidgetItem(self.file_list_widget, [fname])
+            # For image datasets, the frame_key is the filename
+            for frame_key in self.state.dataset.file_list:
+                item = QTreeWidgetItem(self.file_list_widget, [frame_key])
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(0, Qt.CheckState.Checked if fname in self.state.selected_files else Qt.CheckState.Unchecked)
+                item.setCheckState(0, Qt.CheckState.Checked if frame_key in self.state.selected_files else Qt.CheckState.Unchecked)
 
         self.update_file_list_selection()
         selected = len(self.state.selected_files)
@@ -423,28 +444,37 @@ class AnnotationSelector(QMainWindow):
         if not current_fname:
             return
 
+        is_video = self.state.dataset.is_video_dataset
+        video_id, fname = (current_fname.split('/', 1)) if is_video else (None, current_fname)
+
         iterator = QTreeWidgetItemIterator(self.file_list_widget)
         while iterator.value():
             item = iterator.value()
-            # Find the child item with the matching filename
-            if item.childCount() == 0 and item.text(0) == current_fname:
-                self.file_list_widget.setCurrentItem(item)
-                self.file_list_widget.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
-                # Expand its parent to make it visible
+            # Find the item with the matching filename
+            if item.childCount() == 0 and item.text(0) == fname:
                 parent = item.parent()
-                if parent and not parent.isExpanded():
-                    parent.setExpanded(True)
-                break
+                # For videos, ensure the parent video_id also matches
+                if is_video and parent and parent.text(0) == video_id:
+                    self.file_list_widget.setCurrentItem(item)
+                    self.file_list_widget.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    if not parent.isExpanded():
+                        parent.setExpanded(True)
+                    break
+                # For images, no parent check is needed
+                elif not is_video:
+                    self.file_list_widget.setCurrentItem(item)
+                    self.file_list_widget.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    break
             iterator += 1
 
     def on_item_changed(self, item: QTreeWidgetItem, column: int):
         if item.childCount() > 0:  # Ignore folders
             return
-        fname = item.text(0)
+        frame_key = self._get_frame_key_from_item(item)
         if item.checkState(0) == Qt.CheckState.Checked:
-            self.state.selected_files.add(fname)
+            self.state.selected_files.add(frame_key)
         else:
-            self.state.selected_files.discard(fname)
+            self.state.selected_files.discard(frame_key)
         self.count_label.setText(f"Selected: {len(self.state.selected_files)} / {len(self.state.dataset.file_list)}")
 
     def show_stats(self):
@@ -475,20 +505,9 @@ class AnnotationSelector(QMainWindow):
         if confirm == QMessageBox.StandardButton.No:
             return
 
-        is_video = getattr(self.state.dataset, "is_video_dataset", False)
-        data_to_save = None
-
-        if is_video:
-            # For video datasets, group selected files by their video ID
-            video_groups = defaultdict(list)
-            for fname in sorted(list(self.state.selected_files)):
-                video_id = self.state.dataset.video_map.get(fname)
-                if video_id:
-                    video_groups[video_id].append(fname)
-            data_to_save = video_groups
-        else:
-            # For image datasets, save a simple list of filenames
-            data_to_save = sorted(list(self.state.selected_files))
+        # The frame_key format works for both video and image datasets.
+        # We just save the list of unique frame_keys.
+        data_to_save = sorted(list(self.state.selected_files))
 
         try:
             with open(path, "w") as f:
@@ -504,15 +523,11 @@ class AnnotationSelector(QMainWindow):
         try:
             with open(path, "r") as f:
                 loaded_data = json.load(f)
-                loaded_files = set()
+                # The new format is always a list of frame_keys.
+                if not isinstance(loaded_data, list):
+                    raise ValueError("Unsupported selection file format. Expected a list of filenames/frame_keys.")
 
-                if isinstance(loaded_data, dict):  # Video dataset format
-                    for fnames in loaded_data.values():
-                        loaded_files.update(fnames)
-                elif isinstance(loaded_data, list):  # Image dataset format
-                    loaded_files = set(loaded_data)
-                else:
-                    raise ValueError("Unsupported selection file format.")
+                loaded_files = set(loaded_data)
 
                 available_files = set(self.state.dataset.file_list)
                 matched_files = loaded_files.intersection(available_files)
@@ -559,19 +574,23 @@ class AnnotationSelector(QMainWindow):
             if not current:  # Should not happen with current logic, but good practice
                 return
 
-        fname = current.text(0)
-        if fname in self.state.dataset.file_list and self.state.current_filename() != fname:
-            self.state.current_index = self.state.dataset.file_list.index(fname)
+        frame_key = self._get_frame_key_from_item(current)
+        if frame_key and frame_key in self.state.dataset.file_list and self.state.current_filename() != frame_key:
+            self.state.current_index = self.state.dataset.file_list.index(frame_key)
             self.update_display()
 
     def play_video(self):
-        fname = self.state.current_filename()
-        video_id = self.state.dataset.video_map.get(fname)
-        if not video_id:
-            QMessageBox.warning(self, "Not a video file", "This file is not part of a video.")
+        frame_key = self.state.current_filename()
+        if not self.state.dataset.is_video_dataset:
+            QMessageBox.warning(self, "Not a video dataset", "This feature is only available for video datasets.")
             return
-        player = VideoPlayerDialog(self.state.dataset, video_id)
-        player.exec()
+        try:
+            video_id, _ = frame_key.split('/', 1)
+            player = VideoPlayerDialog(self.state.dataset, video_id)
+            player.exec()
+        except (ValueError, IndexError):
+            QMessageBox.warning(self, "Invalid Frame", f"Could not determine video ID from frame: {frame_key}")
+
 
     def show_help(self):
         help_text = """

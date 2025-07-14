@@ -21,7 +21,6 @@ class PanopticDataset(BaseDataset):
         self.ann_file = ann_file
         self.mask_dir = mask_dir
         self.is_video_dataset = False
-        self.video_map = {}
         self.visualizer_segments = {}
 
     def load(self):
@@ -43,8 +42,16 @@ class PanopticDataset(BaseDataset):
                 self.is_video_dataset = True
                 print("Detected video dataset format.")
                 for video in data['annotations']:
+                    # Defensive checks for each video entry
+                    if 'video_id' not in video:
+                        print(f"Warning: Skipping an entry in annotations list because 'video_id' is missing.")
+                        continue
+                    if 'annotations' not in video or not video['annotations']:
+                        print(f"Warning: No frames found or 'annotations' key missing for video_id: {video['video_id']}. Skipping.")
+                        continue
+
                     video_id = video['video_id']
-                    for frame in video.get('annotations', []):
+                    for frame in video['annotations']:
                         frame['video_id'] = video_id  # Inject video_id for unified processing
                         annotations_list.append(frame)
             else: # Assumed to be an image dataset
@@ -73,35 +80,45 @@ class PanopticDataset(BaseDataset):
 
         for frame in tqdm(annotations_list, desc=f"Processing {self.name}"):
             fname = frame['file_name']
+            # Create a unique key for each frame to handle cases where file names
+            # are repeated across different videos.
             if self.is_video_dataset:
-                unique_id = (frame['video_id'], fname)
+                video_id = frame['video_id']
+                frame_key = f"{video_id}/{fname}"
             else:
-                unique_id = fname
+                video_id = None
+                frame_key = fname
 
-            if unique_id in processed_items:
-                # Avoid processing duplicate entries
+            if frame_key in processed_items:
+                # Avoid processing duplicate entries from the annotation file
                 skipped_duplicates += 1
                 continue
 
-            processed_items.add(unique_id)
+            processed_items.add(frame_key)
             base_name, _ = os.path.splitext(fname)
 
             # Construct paths based on dataset type
             if self.is_video_dataset:
-                video_id = frame['video_id']
                 image_path = os.path.join(self.image_dir, video_id, f"{base_name}.jpg")
                 mask_path = os.path.join(self.mask_dir, video_id, f"{base_name}.png")
             else:
-                video_id = None  # No video_id for flat datasets
                 image_path = os.path.join(self.image_dir, f"{base_name}.jpg")
                 mask_path = os.path.join(self.mask_dir, f"{base_name}.png")
 
-            if not os.path.exists(image_path) or not os.path.exists(mask_path):
+            # Check for file existence and provide specific feedback for debugging
+            image_exists = os.path.exists(image_path)
+            mask_exists = os.path.exists(mask_path)
+            if not image_exists or not mask_exists:
+                if not image_exists:
+                    print(f"Warning: Image file not found, skipping frame. Path: {image_path}")
+                if not mask_exists:
+                    print(f"Warning: Mask file not found, skipping frame. Path: {mask_path}")
                 skipped_missing_files += 1
                 continue
 
             segments_info = frame.get('segments_info', [])
-            self.segments_info[fname] = segments_info
+            if not segments_info:
+                print(f"Warning: Frame '{frame_key}' has no 'segments_info'. It will be processed but may appear empty.")
 
             labels = [seg['category_id'] for seg in segments_info]
             area_map = {seg['category_id']: seg.get('area', 0) for seg in segments_info}
@@ -113,12 +130,11 @@ class PanopticDataset(BaseDataset):
                 total_pixels = panoptic_seg.shape[0] * panoptic_seg.shape[1]
                 coverage = (labeled_pixels / total_pixels) * 100
 
-                self.file_list.append(fname)
-                self.labels[fname] = labels
-                self.areas[fname] = area_map
-                self.coverages[fname] = coverage
-                if video_id:
-                    self.video_map[fname] = video_id
+                self.segments_info[frame_key] = segments_info
+                self.file_list.append(frame_key)
+                self.labels[frame_key] = labels
+                self.areas[frame_key] = area_map
+                self.coverages[frame_key] = coverage
 
                 all_labels_set.update(labels)
                 label_counter.update(labels)
@@ -145,18 +161,20 @@ class PanopticDataset(BaseDataset):
         cat = self.categories.get(cat_id)
         return f"{cat_id}: {cat['name']}" if cat else str(cat_id)
 
-    def _get_paths_and_key(self, fname):
+    def _get_paths_and_key(self, frame_key):
         """Helper to construct paths and metadata key for a given filename."""
-        base_name, _ = os.path.splitext(fname)
 
         if self.is_video_dataset:
-            video_id = self.video_map.get(fname)
-            if not video_id:
-                raise ValueError(f"Video ID not found for '{fname}'")
+            # For video datasets, frame_key is "video_id/fname.ext"
+            video_id, fname = frame_key.split('/', 1)
+            base_name, _ = os.path.splitext(fname)
             image_path = os.path.join(self.image_dir, video_id, f"{base_name}.jpg")
             mask_path = os.path.join(self.mask_dir, video_id, f"{base_name}.png")
             metadata_key = f"{self.name}_{video_id}_{base_name}"
         else:
+            # For image datasets, frame_key is "fname.ext"
+            fname = frame_key
+            base_name, _ = os.path.splitext(fname)
             image_path = os.path.join(self.image_dir, f"{base_name}.jpg")
             mask_path = os.path.join(self.mask_dir, f"{base_name}.png")
             metadata_key = f"{self.name}_{base_name}"
@@ -168,24 +186,22 @@ class PanopticDataset(BaseDataset):
 
         return image_path, mask_path, metadata_key
 
-    def load_image(self, fname):
-        image_path, mask_path, metadata_key = self._get_paths_and_key(fname)
+    def load_image(self, frame_key):
+        image_path, mask_path, metadata_key = self._get_paths_and_key(frame_key)
 
         image = Image.open(image_path).convert("RGB")
         mask = np.array(Image.open(mask_path))
         panoptic_seg = rgb2id(mask).astype(np.int32)
 
-        segments_info = self.segments_info.get(fname)
+        segments_info = self.segments_info.get(frame_key)
         if segments_info is None:
-            raise ValueError(f"No segments found for {fname}")
+            raise ValueError(f"No segments found for {frame_key}")
 
         id_to_label = []  # Indexed by segment order
         viz_segments = []  # Segments with category_id remapped for Visualizer
 
         thing_classes = []
         stuff_classes = []
-        thing_id_map = {}
-        stuff_id_map = {}
         thing_idx = 0
         stuff_idx = 0
 
@@ -223,32 +239,32 @@ class PanopticDataset(BaseDataset):
             panoptic_seg=torch.from_numpy(panoptic_seg),
             segments_info=viz_segments
         )
-        self.visualizer_segments[fname] = viz_segments
+        self.visualizer_segments[frame_key] = viz_segments
         vis_img = vis_output.get_image()
         qimage = QImage(vis_img.data, vis_img.shape[1], vis_img.shape[0], vis_img.strides[0], QImage.Format.Format_RGB888)
 
-        coverage = self.coverages.get(fname, 0.0)
+        coverage = self.coverages.get(frame_key, 0.0)
         id_to_label.append(f"\nCoverage: {coverage:.2f}%")
 
         return QImage(image_path), qimage, id_to_label, f"Coverage: {coverage:.2f}%"
 
-    def get_single_segment_visualization(self, fname, segment_index):
+    def get_single_segment_visualization(self, frame_key, segment_index):
         """
         Visualizes a single panoptic segment using per-image metadata.
-        Assumes load_image(fname) was called beforehand to register metadata.
+        Assumes load_image(frame_key) was called beforehand to register metadata.
         """
-        image_path, mask_path, metadata_key = self._get_paths_and_key(fname)
+        image_path, mask_path, metadata_key = self._get_paths_and_key(frame_key)
 
         image = np.array(Image.open(image_path).convert("RGB"))
         mask = np.array(Image.open(mask_path))
         panoptic_seg = torch.from_numpy(rgb2id(mask).astype(np.int32))
 
-        vis_segments = self.visualizer_segments.get(fname)
+        vis_segments = self.visualizer_segments.get(frame_key)
         if vis_segments is None:
-            raise RuntimeError(f"Visualizer segments not cached for {fname}. Call load_image() first.")
+            raise RuntimeError(f"Visualizer segments not cached for {frame_key}. Call load_image() first.")
 
         if not (0 <= segment_index < len(vis_segments)):
-            raise IndexError(f"Invalid segment index {segment_index} for '{fname}'")
+            raise IndexError(f"Invalid segment index {segment_index} for '{frame_key}'")
 
         if metadata_key not in MetadataCatalog.list():
             raise KeyError(f"Metadata '{metadata_key}' not registered. Call load_image() first.")

@@ -34,15 +34,20 @@ def process_selection_file(selection_file, all_datasets_config):
     except Exception as e:
         raise RuntimeError(f"Failed to load or parse selection file '{selection_file}': {e}")
 
-    if isinstance(selection_data, dict):
-        selected_files = [f for files in selection_data.values() for f in files]
-    elif isinstance(selection_data, list):
+    if isinstance(selection_data, list):
         selected_files = selection_data
+    elif isinstance(selection_data, dict):
+        raise TypeError(
+            f"Selection file '{selection_file}' is in an outdated dictionary format "
+            "which is not supported. Please re-save your selections from the "
+            "Annotation Selector UI to update the file to the new list-based format."
+        )
     else:
         raise ValueError(f"Unsupported format in selection file '{selection_file}'")
 
     if not selected_files:
-        raise ValueError(f"No files found in selection file: {selection_file}")
+        print(f"Warning: No files found in selection file: {selection_file}. Skipping.")
+        return
 
     print(f" Found {len(selected_files)} files to export for '{dataset_name}'")
 
@@ -51,45 +56,52 @@ def process_selection_file(selection_file, all_datasets_config):
     dataset_export_dir = os.path.join(output_base_dir, dataset_name)
     os.makedirs(dataset_export_dir, exist_ok=True)
 
-    for fname in tqdm(selected_files, desc=f"Exporting {dataset_name}"):
-        image_id = os.path.splitext(fname)[0]
-        if dataset.is_video_dataset:
-            video_id = dataset.video_map.get(fname)
-            if not video_id:
-                raise KeyError(f"Missing video_id mapping for '{fname}'")
-            image_id = f"{video_id}_{image_id}"
+    for frame_key in tqdm(selected_files, desc=f"Exporting {dataset_name}"):
+        try:
+            if dataset.is_video_dataset:
+                if '/' not in frame_key:
+                    print(f"\nWarning: Skipping invalid frame_key '{frame_key}' for video dataset (missing 'video_id/').")
+                    continue
+                video_id, fname = frame_key.split('/', 1)
+                base_name, _ = os.path.splitext(fname)
+                image_id = f"{video_id}_{base_name}"
+            else:
+                fname = frame_key
+                video_id = None
+                base_name, _ = os.path.splitext(fname)
+                image_id = base_name
 
-        output_item_dir = os.path.join(dataset_export_dir, image_id)
-        os.makedirs(output_item_dir, exist_ok=True)
+            output_item_dir = os.path.join(dataset_export_dir, image_id)
+            os.makedirs(output_item_dir, exist_ok=True)
 
-        # Load visualized data
-        original_qimg, mask_qimg, labels, _ = dataset.load_image(fname)
+            # Load visualized data using the unique frame_key
+            original_qimg, mask_qimg, labels, _ = dataset.load_image(frame_key)
 
-        if original_qimg is None or mask_qimg is None:
-            raise RuntimeError(f"Failed to load visual data for '{fname}'.")
+            # a) Save original image by reconstructing its path
+            jpg_fname = f"{base_name}.jpg"
+            if dataset.is_video_dataset:
+                original_image_path = os.path.join(dataset.image_dir, video_id, jpg_fname)
+            else:
+                original_image_path = os.path.join(dataset.image_dir, jpg_fname)
 
-        # a) Save original image (try loading from disk first)
-        jpg_fname = fname.replace(".png", ".jpg")
-        if dataset.is_video_dataset:
-            video_id = dataset.video_map.get(fname)
-            original_image_path = os.path.join(dataset.image_dir, video_id, jpg_fname)
-        else:
-            original_image_path = os.path.join(dataset.image_dir, jpg_fname)
+            if not os.path.isfile(original_image_path):
+                raise FileNotFoundError(f"Original image not found: {original_image_path}")
 
-        if not os.path.isfile(original_image_path):
-            raise FileNotFoundError(f"Original image not found: {original_image_path}")
+            shutil.copy(original_image_path, os.path.join(output_item_dir, "original.jpg"))
 
-        shutil.copy(original_image_path, os.path.join(output_item_dir, "original.jpg"))
+            # b) Save overlay image
+            mask_output_path = os.path.join(output_item_dir, "overlay.png")
+            if not mask_qimg.save(mask_output_path):
+                raise IOError(f"Failed to save mask overlay to {mask_output_path}")
 
-        # b) Save overlay image
-        mask_output_path = os.path.join(output_item_dir, "overlay.png")
-        if not mask_qimg.save(mask_output_path):
-            raise IOError(f"Failed to save mask overlay to {mask_output_path}")
+            # c) Save label list
+            labels_txt_path = os.path.join(output_item_dir, "labels.txt")
+            with open(labels_txt_path, "w") as f:
+                f.write("\n".join(labels[:-1]))  # Exclude coverage
 
-        # c) Save label list
-        labels_txt_path = os.path.join(output_item_dir, "labels.txt")
-        with open(labels_txt_path, "w") as f:
-            f.write("\n".join(labels[:-1]))  # Exclude coverage
+        except Exception as e:
+            print(f"\nWarning: Could not process '{frame_key}'. Skipping. Error: {e}")
+            continue
 
     print(f" Finished exporting {len(selected_files)} items to '{dataset_export_dir}'")
 
