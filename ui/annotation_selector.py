@@ -301,13 +301,60 @@ class AnnotationSelector(QMainWindow):
                 return f"{video_id}/{fname}"
         return item.text(0)
 
+    def _get_next_index_for_advance(self):
+        """
+        Calculates the index of the next item to display after a select/deselect action.
+        - For image datasets, it's the next image.
+        - For video datasets, it's the first frame of the next video.
+        """
+        if not self.state.dataset.file_list:
+            return 0
+
+        num_files = len(self.state.dataset.file_list)
+        current_idx = self.state.current_index
+
+        if not self.state.dataset.is_video_dataset:
+            # Simple case: just the next item in the list
+            return (current_idx + 1) % num_files
+
+        # Video dataset case: find the first frame of the next video
+        current_frame_key = self.state.current_filename()
+        if not current_frame_key or '/' not in current_frame_key:
+            # Fallback for safety, though should not be reached with valid data
+            return (current_idx + 1) % num_files
+
+        current_video_id, _ = current_frame_key.split('/', 1)
+
+        # Search from the current position to the end of the list
+        for i in range(current_idx + 1, num_files):
+            next_frame_key = self.state.dataset.file_list[i]
+            next_video_id, _ = next_frame_key.split('/', 1)
+            if next_video_id != current_video_id:
+                return i  # Found the start of the next video
+
+        # If no next video is found by the end, wrap around to the beginning.
+        # This correctly handles being in the last video; the next is the first.
+        return 0
+
     def select_current(self):
-        self.state.selected_files.add(self.state.current_filename())
+        current_fname = self.state.current_filename()
+        if not current_fname:
+            return
+
+        self.state.selected_files.add(current_fname)
         self.refresh_file_list()
+        # After selecting, automatically move to the next item/video
+        self.state.current_index = self._get_next_index_for_advance()
+        self.update_display()
 
     def deselect_current(self):
-        self.state.selected_files.discard(self.state.current_filename())
+        current_fname = self.state.current_filename()
+        if not current_fname:
+            return
+        self.state.selected_files.discard(current_fname)
         self.refresh_file_list()
+        self.state.current_index = self._get_next_index_for_advance()
+        self.update_display()
 
     def keyPressEvent(self, event: QKeyEvent):
         if not self.state.dataset.file_list or not self.state.current_filename():
