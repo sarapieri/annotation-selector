@@ -20,6 +20,7 @@ class AppState:
             )
         
         self.image_cache = {}
+        self.coverage_cache = {}
         initial_dataset_name = list(self.datasets.keys())[0]
         # Set initial dataset and load its data (blocking)
         self.change_dataset(initial_dataset_name)
@@ -78,6 +79,7 @@ class AppState:
         self.selected_files = set()
         if hasattr(self, 'image_cache'):
             self.image_cache.clear()
+        self.coverage_cache.clear()
 
     def load_active_dataset_data(self):
         """
@@ -100,6 +102,11 @@ class AppState:
                 else:
                     # For image datasets, just sort by filename
                     self.dataset.file_list.sort(key=natural_sort_key)
+            
+            # Pre-populate the coverage cache for instantaneous filtering.
+            # This is very fast as the dataset already calculated these values during its .load() method.
+            if hasattr(self.dataset, 'coverages'):
+                self.coverage_cache = self.dataset.coverages.copy()
 
     def _load_and_cache_image(self, fname):
         if not fname:
@@ -110,15 +117,15 @@ class AppState:
 
     def get_original_image(self, fname=None):
         fname = fname or self.current_filename()
-        img, _, _, _ = self._load_and_cache_image(fname)
+        img, _, _ = self._load_and_cache_image(fname)
         return img
 
     def get_mask_image(self, fname=None):
         fname = fname or self.current_filename()
-        _, mask, _, _ = self._load_and_cache_image(fname)
+        _, mask, _ = self._load_and_cache_image(fname)
         return mask
 
     def get_labels(self, fname=None):
         fname = fname or self.current_filename()
-        _, _, labels, _ = self._load_and_cache_image(fname)
+        _, _, labels = self._load_and_cache_image(fname)
         return labels

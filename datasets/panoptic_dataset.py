@@ -22,6 +22,7 @@ class PanopticDataset(BaseDataset):
         self.mask_dir = mask_dir
         self.is_video_dataset = False
         self.visualizer_segments = {}
+        self.font_size = 25 if "VIPSeg" in name else 10
 
     def load(self):
         print(f"Loading {self.name} dataset... This may take a few seconds.")
@@ -235,6 +236,7 @@ class PanopticDataset(BaseDataset):
             meta.stuff_classes = stuff_classes
 
         visualizer = Visualizer(np.array(image), MetadataCatalog.get(metadata_key), instance_mode=ColorMode.IMAGE)
+        visualizer._default_font_size = self.font_size
         vis_output = visualizer.draw_panoptic_seg_predictions(
             panoptic_seg=torch.from_numpy(panoptic_seg),
             segments_info=viz_segments
@@ -243,10 +245,7 @@ class PanopticDataset(BaseDataset):
         vis_img = vis_output.get_image()
         qimage = QImage(vis_img.data, vis_img.shape[1], vis_img.shape[0], vis_img.strides[0], QImage.Format.Format_RGB888)
 
-        coverage = self.coverages.get(frame_key, 0.0)
-        id_to_label.append(f"\nCoverage: {coverage:.2f}%")
-
-        return QImage(image_path), qimage, id_to_label, f"Coverage: {coverage:.2f}%"
+        return QImage(image_path), qimage, id_to_label
 
     def get_single_segment_visualization(self, frame_key, segment_index):
         """
@@ -270,6 +269,7 @@ class PanopticDataset(BaseDataset):
             raise KeyError(f"Metadata '{metadata_key}' not registered. Call load_image() first.")
 
         visualizer = Visualizer(image, MetadataCatalog.get(metadata_key), instance_mode=ColorMode.IMAGE)
+        visualizer._default_font_size  = self.font_size
         vis_output = visualizer.draw_panoptic_seg_predictions(
             panoptic_seg=panoptic_seg,
             segments_info=[vis_segments[segment_index]]

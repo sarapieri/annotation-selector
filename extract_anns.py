@@ -75,7 +75,7 @@ def process_selection_file(selection_file, all_datasets_config):
             os.makedirs(output_item_dir, exist_ok=True)
 
             # Load visualized data using the unique frame_key
-            original_qimg, mask_qimg, labels, _ = dataset.load_image(frame_key)
+            original_qimg, mask_qimg, labels = dataset.load_image(frame_key)
 
             # a) Save original image by reconstructing its path
             jpg_fname = f"{base_name}.jpg"

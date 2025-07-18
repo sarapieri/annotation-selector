@@ -5,8 +5,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QPixmap, QKeyEvent, QGuiApplication
 from PyQt6.QtCore import Qt, QThread
+from typing import Optional
 from utils.state import AppState, natural_sort_key
-import os 
+import os
+import re
 import json
 from collections import defaultdict
 
@@ -25,6 +27,9 @@ class AnnotationSelector(QMainWindow):
         # State for single-mask view
         self.full_panoptic_mask = None
         self.selected_label_item = None
+        self.high_coverage_filter_active = False
+        self.frame_key_to_item_map = {}
+        self.coverage_label = None
 
         # Resize window to 75% of the screen
         screen = QGuiApplication.primaryScreen().availableGeometry()
@@ -101,6 +106,16 @@ class AnnotationSelector(QMainWindow):
         self.label_panel.setWordWrap(True)
         self.label_panel.itemClicked.connect(self.on_label_clicked)
 
+        # New dedicated label for coverage, to be placed below the list
+        self.coverage_label = QLabel("Coverage: N/A")
+        self.coverage_label.setFixedWidth(170)
+        self.coverage_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = self.coverage_label.font()
+        font.setItalic(True)
+        self.coverage_label.setFont(font)
+        # Add a top border for visual separation
+        self.coverage_label.setStyleSheet("border-top: 1px solid #c0c0c0; padding-top: 5px; margin-top: 5px;")
+
         self.select_button = QPushButton("Select ✓")
         self.deselect_button = QPushButton("Deselect ✗")
         self.save_button = QPushButton("Save 💾")
@@ -109,13 +124,17 @@ class AnnotationSelector(QMainWindow):
         self.stats_button = QPushButton("Show Stats 📊")
         self.play_video_button = QPushButton("Play Video ▶️")
 
+        self.coverage_filter_button = QPushButton("Coverage > 90%")
+        self.coverage_filter_button.setCheckable(True)
+
         self.select_button.clicked.connect(self.select_current)
         self.deselect_button.clicked.connect(self.deselect_current)
-        self.save_button.clicked.connect(self.save_selection)
-        self.load_button.clicked.connect(self.load_selections)
+        self.save_button.clicked.connect(self.save_selection) # Keep as is
+        self.load_button.clicked.connect(self.on_load_button_clicked) # Use a dedicated handler
         self.clear_button.clicked.connect(self.clear_selections)
         self.stats_button.clicked.connect(self.show_stats)
         self.play_video_button.clicked.connect(self.play_video)
+        self.coverage_filter_button.toggled.connect(self.toggle_coverage_filter)
 
         button_layout.addWidget(self.select_button)
         button_layout.addWidget(self.deselect_button)
@@ -124,6 +143,7 @@ class AnnotationSelector(QMainWindow):
         button_layout.addWidget(self.clear_button)
         button_layout.addWidget(self.stats_button)
         button_layout.addWidget(self.play_video_button)
+        button_layout.addWidget(self.coverage_filter_button)
 
         self.file_list_widget = QTreeWidget()
         self.file_list_widget.setHeaderHidden(True)
@@ -131,7 +151,14 @@ class AnnotationSelector(QMainWindow):
         self.file_list_widget.itemChanged.connect(self.on_item_changed)
         self.file_list_widget.currentItemChanged.connect(self.on_item_selected)
         self.file_list_widget.setCursor(Qt.CursorShape.PointingHandCursor)
-    
+        self.file_list_widget.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self.file_list_widget.setStyleSheet("""
+            QTreeWidget::item:hover {
+                background-color: #A0522D; /* Sienna - a darker brown for hover */
+                color: white; /* Ensure text is readable on dark background */
+            }
+        """)
+
         image_row = QHBoxLayout()
         image_row.setSpacing(10)
         image_row.setContentsMargins(0, 0, 0, 0)
@@ -150,8 +177,13 @@ class AnnotationSelector(QMainWindow):
         right_container.addWidget(self.mask_image)
         image_row.addLayout(right_container, stretch=1)
 
-        # Label panel
-        image_row.addWidget(self.label_panel)
+        # Right-side panel for labels and coverage
+        right_panel_layout = QVBoxLayout()
+        right_panel_layout.setSpacing(0)
+        right_panel_layout.setContentsMargins(0, 0, 0, 0)
+        right_panel_layout.addWidget(self.label_panel)
+        right_panel_layout.addWidget(self.coverage_label)
+        image_row.addLayout(right_panel_layout)
 
 
         main_layout.addLayout(top_layout)
@@ -176,7 +208,8 @@ class AnnotationSelector(QMainWindow):
         """)
         self.loading_label.hide()
 
-        self.load_selections()
+        self.load_selections(show_success_message=True)
+        self.refresh_file_list()
         self.update_display()
 
     def on_label_clicked(self, item: QListWidgetItem):
@@ -260,8 +293,11 @@ class AnnotationSelector(QMainWindow):
 
     def on_loading_finished(self):
         """Called via signal when the background worker is done."""
-        self.load_selections()  # This calls refresh_file_list internally
-        self.update_display()   # Now update the rest of the UI
+        # The order is important: load state, refresh UI list, then update display
+        self.load_selections(show_success_message=True)
+        self.refresh_file_list()
+        self.update_display()
+
         self.loading_label.hide()
         self.centralWidget().setDisabled(False)
 
@@ -303,48 +339,60 @@ class AnnotationSelector(QMainWindow):
 
     def _get_next_index_for_advance(self):
         """
-        Calculates the index of the next item to display after a select/deselect action.
-        - For image datasets, it's the next image.
-        - For video datasets, it's the first frame of the next video.
+        Calculates the index of the next visible item to display after a select/deselect action.
+        This respects any active filters and works for both image and video datasets.
         """
-        if not self.state.dataset.file_list:
+        file_list = self.state.dataset.file_list
+        if not file_list:
             return 0
 
-        num_files = len(self.state.dataset.file_list)
+        num_files = len(file_list)
         current_idx = self.state.current_index
-
-        if not self.state.dataset.is_video_dataset:
-            # Simple case: just the next item in the list
-            return (current_idx + 1) % num_files
-
-        # Video dataset case: find the first frame of the next video
         current_frame_key = self.state.current_filename()
-        if not current_frame_key or '/' not in current_frame_key:
-            # Fallback for safety, though should not be reached with valid data
-            return (current_idx + 1) % num_files
 
-        current_video_id, _ = current_frame_key.split('/', 1)
+        # --- Improved Video Dataset Logic ---
+        if self.state.dataset.is_video_dataset:
+            if current_frame_key and '/' in current_frame_key:
+                current_video_id, _ = current_frame_key.split('/', 1)
 
-        # Search from the current position to the end of the list
-        for i in range(current_idx + 1, num_files):
-            next_frame_key = self.state.dataset.file_list[i]
-            next_video_id, _ = next_frame_key.split('/', 1)
-            if next_video_id != current_video_id:
-                return i  # Found the start of the next video
+                # Build a mapping from video ID to its list of (index, frame_key)
+                video_to_frames = defaultdict(list)
+                for idx, frame_key in enumerate(file_list):
+                    video_id, _ = frame_key.split('/', 1)
+                    video_to_frames[video_id].append((idx, frame_key))
 
-        # If no next video is found by the end, wrap around to the beginning.
-        # This correctly handles being in the last video; the next is the first.
-        return 0
+                # Track whether we've passed the current video
+                passed_current = False
+
+                for video_id in sorted(video_to_frames.keys(), key=natural_sort_key):
+                    if not passed_current:
+                        if video_id == current_video_id:
+                            passed_current = True
+                        continue
+
+                    # Look for the first visible frame in the next video
+                    for idx, frame_key in video_to_frames[video_id]:
+                        if self.is_file_visible(frame_key):
+                            return idx
+
+        # --- Fallback: next visible frame regardless of video ---
+        for i in range(1, num_files + 1):
+            next_idx = (current_idx + i) % num_files
+            fname = file_list[next_idx]
+            if self.is_file_visible(fname):
+                return next_idx
+
+        # --- Ultimate fallback: stay where we are ---
+        return current_idx
+
 
     def select_current(self):
         current_fname = self.state.current_filename()
         if not current_fname:
             return
-
         self.state.selected_files.add(current_fname)
-        self.refresh_file_list()
-        # After selecting, automatically move to the next item/video
         self.state.current_index = self._get_next_index_for_advance()
+        self.refresh_file_list()
         self.update_display()
 
     def deselect_current(self):
@@ -352,9 +400,38 @@ class AnnotationSelector(QMainWindow):
         if not current_fname:
             return
         self.state.selected_files.discard(current_fname)
-        self.refresh_file_list()
         self.state.current_index = self._get_next_index_for_advance()
+        self.refresh_file_list()
         self.update_display()
+
+    def navigate_list(self, direction: int):
+        """Navigates to the next or previous visible item in the list."""
+        num_files = len(self.state.dataset.file_list)
+        if num_files == 0:
+            return
+
+        current_idx = self.state.current_index
+
+        # Search for the next valid (visible) index
+        for i in range(1, num_files + 1):
+            next_idx = (current_idx + (i * direction) + num_files) % num_files
+            fname = self.state.dataset.file_list[next_idx]
+
+            if self.is_file_visible(fname):
+                self.state.current_index = next_idx
+                self.update_display()
+                # After updating the display, we must also sync the file list's highlight.
+                self.update_file_list_selection()
+                return
+
+    def is_file_visible(self, fname_to_check: str) -> bool:
+        """Checks if a file should be visible based on active filters."""
+        if not self.high_coverage_filter_active:
+            return True
+
+        # This check is now very fast as coverage is pre-calculated and cached at load time.
+        coverage = self.state.coverage_cache.get(fname_to_check)
+        return coverage is not None and coverage > 90
 
     def keyPressEvent(self, event: QKeyEvent):
         if not self.state.dataset.file_list or not self.state.current_filename():
@@ -362,18 +439,18 @@ class AnnotationSelector(QMainWindow):
             return
         key = event.key()
         if key == Qt.Key.Key_Right:
-            self.state.current_index = (self.state.current_index + 1) % len(self.state.dataset.file_list)
+            self.navigate_list(1)
         elif key == Qt.Key.Key_Left:
-            self.state.current_index = (self.state.current_index - 1) % len(self.state.dataset.file_list)
+            self.navigate_list(-1)
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             fname = self.state.current_filename()
-            if fname in self.state.selected_files:
-                self.state.selected_files.remove(fname)
+            # Make Enter key behave like the Select/Deselect buttons for consistency
+            if fname and fname in self.state.selected_files:
+                self.deselect_current()
             else:
-                self.state.selected_files.add(fname)
-            self.refresh_file_list()
-    
-        self.update_display()
+                self.select_current()
+        else:
+            super().keyPressEvent(event)
 
     def update_display(self):
         fname = self.state.current_filename()
@@ -402,26 +479,14 @@ class AnnotationSelector(QMainWindow):
         self.full_panoptic_mask = mask_img
         self.selected_label_item = None
 
-        # Sync highlighted item in the list with current image
-        file_list = self.state.dataset.file_list
-        if file_list:
-            self.file_list_widget.blockSignals(True)
-            self.update_file_list_selection()
-            self.file_list_widget.blockSignals(False)
-
         self.original_image.setPixmap(QPixmap.fromImage(orig_img))
         self.original_image.update_scaled_pixmap()
 
         self.mask_image.setPixmap(QPixmap.fromImage(mask_img))
         self.mask_image.update_scaled_pixmap()
 
-        # self.label_panel.setText("Labels:\n" + "\n".join(labels))
         self.label_panel.clear()
         if labels:
-            # The last item is coverage, which we'll display but not make clickable
-            coverage_text = labels[-1]
-            actual_labels = labels[:-1]
-
             # Add a header
             header_item = QListWidgetItem("Labels")
             font = header_item.font()
@@ -430,19 +495,18 @@ class AnnotationSelector(QMainWindow):
             header_item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.label_panel.addItem(header_item)
 
-            self.label_panel.addItems(actual_labels)
+            self.label_panel.addItems(labels)
 
-            # Add a separator
-            separator = QListWidgetItem("—" * 20)
-            separator.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            separator.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.label_panel.addItem(separator)
+        # Update the dedicated coverage label
+        coverage = self.state.coverage_cache.get(fname)
+        if coverage is not None:
+            self.coverage_label.setText(f"Coverage: {coverage:.2f}%")
+            self.coverage_label.show()
+        else:
+            # Hide the label if there's no coverage data to avoid showing "N/A"
+            self.coverage_label.hide()
 
-            # Add coverage info as a non-interactive item
-            coverage_item = QListWidgetItem(coverage_text)
-            coverage_item.setFlags(Qt.ItemFlag.NoItemFlags) # Make it non-selectable
-            self.label_panel.addItem(coverage_item)
-
+        file_list = self.state.dataset.file_list
         if file_list:
             current_idx = self.state.current_index
             total = len(file_list)
@@ -456,6 +520,7 @@ class AnnotationSelector(QMainWindow):
     def refresh_file_list(self):
         self.file_list_widget.blockSignals(True)
         self.file_list_widget.clear()
+        self.frame_key_to_item_map.clear()
 
         is_video = getattr(self.state.dataset, "is_video_dataset", False)
 
@@ -472,47 +537,89 @@ class AnnotationSelector(QMainWindow):
                     child = QTreeWidgetItem(parent, [fname])
                     child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     child.setCheckState(0, Qt.CheckState.Checked if frame_key in self.state.selected_files else Qt.CheckState.Unchecked)
+                    self.frame_key_to_item_map[frame_key] = child
         else:
             # For image datasets, the frame_key is the filename
             for frame_key in self.state.dataset.file_list:
                 item = QTreeWidgetItem(self.file_list_widget, [frame_key])
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(0, Qt.CheckState.Checked if frame_key in self.state.selected_files else Qt.CheckState.Unchecked)
+                self.frame_key_to_item_map[frame_key] = item
 
+        self.apply_view_filters()
+
+        # Sync the highlighted item in the list with the current state
         self.update_file_list_selection()
+
         selected = len(self.state.selected_files)
         total = len(self.state.dataset.file_list)
         self.count_label.setText(f"Selected: {selected} / {total}")
 
         self.file_list_widget.blockSignals(False)
 
-    def update_file_list_selection(self):
-        current_fname = self.state.current_filename()
-        if not current_fname:
-            return
+    def toggle_coverage_filter(self, checked: bool):
+        if checked:
+            # A vibrant orange to indicate the filter is active.
+            self.coverage_filter_button.setStyleSheet("""
+                background-color: #FFA500;
+                color: white;
+                font-weight: bold;
+                border: 1px solid #D35400;
+            """)
+        else:
+            # Revert to the default stylesheet to match other buttons.
+            self.coverage_filter_button.setStyleSheet("")
 
-        is_video = self.state.dataset.is_video_dataset
-        video_id, fname = (current_fname.split('/', 1)) if is_video else (None, current_fname)
+        self.high_coverage_filter_active = checked
+        # This is now instantaneous because coverage data is pre-cached at load time.
+        self.refresh_file_list()
+        # If the current item is now hidden, find the next visible one
+        if self.state.current_filename() and not self.is_file_visible(self.state.current_filename()):
+            self.navigate_list(1)
 
+    def apply_view_filters(self):
+        """Hides or shows items in the file list based on active filters."""
         iterator = QTreeWidgetItemIterator(self.file_list_widget)
+
+        # First pass: hide/show individual file items
         while iterator.value():
             item = iterator.value()
-            # Find the item with the matching filename
-            if item.childCount() == 0 and item.text(0) == fname:
-                parent = item.parent()
-                # For videos, ensure the parent video_id also matches
-                if is_video and parent and parent.text(0) == video_id:
-                    self.file_list_widget.setCurrentItem(item)
-                    self.file_list_widget.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
-                    if not parent.isExpanded():
-                        parent.setExpanded(True)
-                    break
-                # For images, no parent check is needed
-                elif not is_video:
-                    self.file_list_widget.setCurrentItem(item)
-                    self.file_list_widget.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
-                    break
+            if item.childCount() == 0:  # It's a file item
+                frame_key = self._get_frame_key_from_item(item)
+                item.setHidden(not self.is_file_visible(frame_key))
             iterator += 1
+
+        # Second pass (for video datasets): hide parent if all children are hidden
+        if getattr(self.state.dataset, "is_video_dataset", False):
+            iterator = QTreeWidgetItemIterator(self.file_list_widget)
+            while iterator.value():
+                item = iterator.value()
+                if item.childCount() > 0:  # It's a video folder item
+                    all_children_hidden = True
+                    for i in range(item.childCount()):
+                        if not item.child(i).isHidden():
+                            all_children_hidden = False
+                            break
+                    item.setHidden(all_children_hidden)
+                iterator += 1
+
+    def update_file_list_selection(self):
+        current_fname = self.state.current_filename()
+        if not current_fname: # Nothing to select
+            return
+
+        # Use the map for an instantaneous lookup, which is much faster than iterating.
+        item = self.frame_key_to_item_map.get(current_fname)
+        if not item:
+            return # Current item might be filtered out and thus not in the visible list
+
+        # Expand parent if it exists and is not expanded, to ensure the item is visible
+        parent = item.parent()
+        if parent and not parent.isExpanded():
+            parent.setExpanded(True)
+
+        self.file_list_widget.setCurrentItem(item)
+        self.file_list_widget.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def on_item_changed(self, item: QTreeWidgetItem, column: int):
         if item.childCount() > 0:  # Ignore folders
@@ -554,7 +661,11 @@ class AnnotationSelector(QMainWindow):
 
         # The frame_key format works for both video and image datasets.
         # We just save the list of unique frame_keys.
-        data_to_save = sorted(list(self.state.selected_files))
+        # We now save a dictionary to include the last viewed file for resuming sessions.
+        data_to_save = {
+            "selected_files": sorted(list(self.state.selected_files)),
+            "last_viewed": self.state.current_filename()
+        }
 
         try:
             with open(path, "w") as f:
@@ -564,39 +675,68 @@ class AnnotationSelector(QMainWindow):
             return
 
         QMessageBox.information(self, "Saved", f"Saved {len(self.state.selected_files)} selections to:\n{path}")
-    
-    def load_selections(self):
+
+    def on_load_button_clicked(self):
+        """
+        Handles the manual click of the Load button, shows a success message,
+        and refreshes the UI.
+        """
+        self.load_selections(show_success_message=True)
+        self.refresh_file_list()
+        self.update_display()
+
+    def load_selections(self, show_success_message: bool = False):
         path = self.selection_file_path()
         try:
             with open(path, "r") as f:
                 loaded_data = json.load(f)
-                # The new format is always a list of frame_keys.
-                if not isinstance(loaded_data, list):
-                    raise ValueError("Unsupported selection file format. Expected a list of filenames/frame_keys.")
 
-                loaded_files = set(loaded_data)
+                last_viewed_file = None
+                loaded_files_list = []
+
+                if isinstance(loaded_data, dict):
+                    # New format: {"selected_files": [...], "last_viewed": "..."}
+                    loaded_files_list = loaded_data.get("selected_files", [])
+                    last_viewed_file = loaded_data.get("last_viewed")
+                    if not isinstance(loaded_files_list, list):
+                         raise ValueError("The 'selected_files' key must contain a list.")
+                elif isinstance(loaded_data, list):
+                    # Old format (backward compatibility): [...]
+                    loaded_files_list = loaded_data
+                else:
+                    raise ValueError("Unsupported selection file format. Expected a list or a dictionary.")
+
+                loaded_files = set(loaded_files_list)
 
                 available_files = set(self.state.dataset.file_list)
                 matched_files = loaded_files.intersection(available_files)
 
-                if not matched_files:
-                    raise ValueError(
-                        f"No selected files in {os.path.basename(path)} match the current dataset: {self.dataset_selector.currentText()}"
+                if loaded_files and not matched_files:
+                    QMessageBox.warning(self, "Load Warning",
+                        f"None of the {len(loaded_files)} selections in {os.path.basename(path)} "
+                        f"match the current dataset: {self.dataset_selector.currentText()}"
                     )
 
                 self.state.selected_files = matched_files
-                QMessageBox.information(self, "Loaded", f"Loaded {len(matched_files)} selections from:\n{path}")
+                if show_success_message:
+                    QMessageBox.information(self, "Loaded", f"Loaded {len(matched_files)} selections from:\n{path}")
+
+                # Resume from last viewed file if it exists in the current dataset
+                if last_viewed_file and last_viewed_file in available_files:
+                    try:
+                        self.state.current_index = self.state.dataset.file_list.index(last_viewed_file)
+                    except ValueError:
+                        # This should not happen due to the 'in' check, but for safety.
+                        pass # Keep index at 0
 
         except FileNotFoundError:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             self.state.selected_files.clear()
-            QMessageBox.information(self, "Created", f"Selection file not found. Created new empty one at:\n{path}")
-
+            # No message needed for a new file, it's normal.
         except (json.JSONDecodeError, TypeError, ValueError) as e:
-            QMessageBox.critical(self, "Load Error", f"Could not load selection file:\n{path}\n\nError: {e}")
-            raise
+            QMessageBox.critical(self, "Load Error", f"Could not load or parse selection file:\n{path}\n\nError: {e}\n\nStarting with empty selection.")
+            self.state.selected_files.clear() # Start fresh on error
 
-        self.refresh_file_list()
         self.play_video_button.setVisible(getattr(self.state.dataset, "is_video_dataset", False))
 
 
@@ -615,11 +755,15 @@ class AnnotationSelector(QMainWindow):
         if not current:
             return
 
-        # If a folder (video) is clicked, select its first child (frame).
+        # If a folder (video) is clicked, we want to select its first child frame instead.
+        # By programmatically setting the current item, we will re-trigger this same
+        # signal, but with the actual frame item. The function will then proceed
+        # with the frame, ensuring the selection and display are always in sync.
         if current.childCount() > 0:
-            current = current.child(0)
-            if not current:  # Should not happen with current logic, but good practice
-                return
+            child = current.child(0)
+            if child:
+                self.file_list_widget.setCurrentItem(child)
+            return # Stop processing for the folder click; the re-triggered signal will handle it.
 
         frame_key = self._get_frame_key_from_item(current)
         if frame_key and frame_key in self.state.dataset.file_list and self.state.current_filename() != frame_key:
