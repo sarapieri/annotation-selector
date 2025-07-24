@@ -34,16 +34,20 @@ def process_selection_file(selection_file, all_datasets_config):
     except Exception as e:
         raise RuntimeError(f"Failed to load or parse selection file '{selection_file}': {e}")
 
-    if isinstance(selection_data, list):
+    if isinstance(selection_data, dict):
+        # New format: {"selected_files": [...], "last_viewed": "..."}
+        if "selected_files" not in selection_data:
+            raise ValueError(f"Selection file '{selection_file}' is missing the 'selected_files' key.")
+        selected_files = selection_data["selected_files"]
+        if not isinstance(selected_files, list):
+            raise ValueError("The 'selected_files' value must be a list.")
+    elif isinstance(selection_data, list):
+        # Legacy format support
+        print(f"\nWarning: Selection file '{selection_file}' uses legacy list format.")
+        print("Please re-save your selections from the Annotation Selector UI to update to the new format.")
         selected_files = selection_data
-    elif isinstance(selection_data, dict):
-        raise TypeError(
-            f"Selection file '{selection_file}' is in an outdated dictionary format "
-            "which is not supported. Please re-save your selections from the "
-            "Annotation Selector UI to update the file to the new list-based format."
-        )
     else:
-        raise ValueError(f"Unsupported format in selection file '{selection_file}'")
+        raise ValueError(f"Unsupported format in selection file '{selection_file}'. Expected a dictionary with 'selected_files' or a list.")
 
     if not selected_files:
         print(f"Warning: No files found in selection file: {selection_file}. Skipping.")

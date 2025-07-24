@@ -198,15 +198,23 @@ class PanopticDataset(BaseDataset):
         if segments_info is None:
             raise ValueError(f"No segments found for {frame_key}")
 
-        id_to_label = []  # Indexed by segment order
-        viz_segments = []  # Segments with category_id remapped for Visualizer
+        # Get the set of segment IDs that actually exist in the mask
+        existing_ids = set(np.unique(panoptic_seg))
+        if 0 in existing_ids:  # Remove background ID if present
+            existing_ids.remove(0)
 
+        # Filter segments_info to only include segments that exist in the mask
+        filtered_segments = []
+        id_to_label = []
         thing_classes = []
         stuff_classes = []
         thing_idx = 0
         stuff_idx = 0
 
         for seg in segments_info:
+            if seg['id'] not in existing_ids:
+                continue  # Skip segments that don't exist in the mask
+
             cat_id = seg["category_id"]
             name = self.categories[cat_id]["name"]
             is_thing = self.category_id_isthing.get(cat_id, 0) == 1
@@ -214,7 +222,7 @@ class PanopticDataset(BaseDataset):
             seg_copy = seg.copy()
             seg_copy["isthing"] = is_thing
 
-            # Create the label string with the correct global index for both UI and visualization
+            # Create the label string with the correct global index
             label_str = f"{len(id_to_label)}"
             id_to_label.append(f"{len(id_to_label)}: {name}")
 
@@ -228,7 +236,7 @@ class PanopticDataset(BaseDataset):
                 stuff_classes.append(label_str)
                 stuff_idx += 1
 
-            viz_segments.append(seg_copy)
+            filtered_segments.append(seg_copy)
 
         if metadata_key not in MetadataCatalog.list():
             meta = MetadataCatalog.get(metadata_key)
@@ -239,9 +247,9 @@ class PanopticDataset(BaseDataset):
         visualizer._default_font_size = self.font_size
         vis_output = visualizer.draw_panoptic_seg_predictions(
             panoptic_seg=torch.from_numpy(panoptic_seg),
-            segments_info=viz_segments
+            segments_info=filtered_segments
         )
-        self.visualizer_segments[frame_key] = viz_segments
+        self.visualizer_segments[frame_key] = filtered_segments
         vis_img = vis_output.get_image()
         qimage = QImage(vis_img.data, vis_img.shape[1], vis_img.shape[0], vis_img.strides[0], QImage.Format.Format_RGB888)
 
@@ -265,14 +273,22 @@ class PanopticDataset(BaseDataset):
         if not (0 <= segment_index < len(vis_segments)):
             raise IndexError(f"Invalid segment index {segment_index} for '{frame_key}'")
 
+        target_segment = vis_segments[segment_index]
+        segment_id = target_segment['id']
+
+        # Check if segment exists in mask
+        if segment_id not in set(torch.unique(panoptic_seg).tolist()):
+            print(f"Warning: Segment ID {segment_id} not found in mask")
+            print(f"Available segment IDs in mask: {torch.unique(panoptic_seg).tolist()}")
+
         if metadata_key not in MetadataCatalog.list():
             raise KeyError(f"Metadata '{metadata_key}' not registered. Call load_image() first.")
 
         visualizer = Visualizer(image, MetadataCatalog.get(metadata_key), instance_mode=ColorMode.IMAGE)
-        visualizer._default_font_size  = self.font_size
+        visualizer._default_font_size = self.font_size
         vis_output = visualizer.draw_panoptic_seg_predictions(
             panoptic_seg=panoptic_seg,
-            segments_info=[vis_segments[segment_index]]
+            segments_info=[target_segment]
         )
         vis_img = vis_output.get_image()
 

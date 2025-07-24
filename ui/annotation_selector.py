@@ -28,6 +28,8 @@ class AnnotationSelector(QMainWindow):
         self.full_panoptic_mask = None
         self.selected_label_item = None
         self.high_coverage_filter_active = False
+        self.high_mask_count_filter_active = False
+        self.show_selected_only_active = False
         self.frame_key_to_item_map = {}
         self.coverage_label = None
 
@@ -113,8 +115,14 @@ class AnnotationSelector(QMainWindow):
         font = self.coverage_label.font()
         font.setItalic(True)
         self.coverage_label.setFont(font)
-        # Add a top border for visual separation
-        self.coverage_label.setStyleSheet("border-top: 1px solid #c0c0c0; padding-top: 5px; margin-top: 5px;")
+        # Add a top border for visual separation and padding for multi-line text
+        self.coverage_label.setStyleSheet("""
+            border-top: 1px solid #c0c0c0;
+            padding-top: 5px;
+            margin-top: 5px;
+            padding-bottom: 5px;
+        """)
+        self.coverage_label.setWordWrap(True)
 
         self.select_button = QPushButton("Select ✓")
         self.deselect_button = QPushButton("Deselect ✗")
@@ -124,8 +132,14 @@ class AnnotationSelector(QMainWindow):
         self.stats_button = QPushButton("Show Stats 📊")
         self.play_video_button = QPushButton("Play Video ▶️")
 
-        self.coverage_filter_button = QPushButton("Coverage > 90%")
+        self.coverage_filter_button = QPushButton("Coverage > 98%")
         self.coverage_filter_button.setCheckable(True)
+
+        self.mask_count_filter_button = QPushButton("Masks > 10")
+        self.mask_count_filter_button.setCheckable(True)
+
+        self.show_selected_button = QPushButton("Show Selected")
+        self.show_selected_button.setCheckable(True)
 
         self.select_button.clicked.connect(self.select_current)
         self.deselect_button.clicked.connect(self.deselect_current)
@@ -135,6 +149,8 @@ class AnnotationSelector(QMainWindow):
         self.stats_button.clicked.connect(self.show_stats)
         self.play_video_button.clicked.connect(self.play_video)
         self.coverage_filter_button.toggled.connect(self.toggle_coverage_filter)
+        self.mask_count_filter_button.toggled.connect(self.toggle_mask_count_filter)
+        self.show_selected_button.toggled.connect(self.toggle_show_selected)
 
         button_layout.addWidget(self.select_button)
         button_layout.addWidget(self.deselect_button)
@@ -144,6 +160,8 @@ class AnnotationSelector(QMainWindow):
         button_layout.addWidget(self.stats_button)
         button_layout.addWidget(self.play_video_button)
         button_layout.addWidget(self.coverage_filter_button)
+        button_layout.addWidget(self.mask_count_filter_button)
+        button_layout.addWidget(self.show_selected_button)
 
         self.file_list_widget = QTreeWidget()
         self.file_list_widget.setHeaderHidden(True)
@@ -424,14 +442,86 @@ class AnnotationSelector(QMainWindow):
                 self.update_file_list_selection()
                 return
 
+    def toggle_coverage_filter(self, checked: bool):
+        if checked:
+            # A vibrant orange to indicate the filter is active.
+            self.coverage_filter_button.setStyleSheet("""
+                background-color: #FFA500;
+                color: white;
+                font-weight: bold;
+                border: 1px solid #D35400;
+            """)
+        else:
+            # Revert to the default stylesheet to match other buttons.
+            self.coverage_filter_button.setStyleSheet("")
+
+        self.high_coverage_filter_active = checked
+        # This is now instantaneous because coverage data is pre-cached at load time.
+        self.refresh_file_list()
+        # If the current item is now hidden, find the next visible one
+        if self.state.current_filename() and not self.is_file_visible(self.state.current_filename()):
+            self.navigate_list(1)
+
+    def toggle_mask_count_filter(self, checked: bool):
+        if checked:
+            # A vibrant orange to indicate the filter is active.
+            self.mask_count_filter_button.setStyleSheet("""
+                background-color: #FFA500;
+                color: white;
+                font-weight: bold;
+                border: 1px solid #D35400;
+            """)
+        else:
+            # Revert to the default stylesheet to match other buttons.
+            self.mask_count_filter_button.setStyleSheet("")
+
+        self.high_mask_count_filter_active = checked
+        # This is now instantaneous because mask count data is pre-cached at load time.
+        self.refresh_file_list()
+        # If the current item is now hidden, find the next visible one
+        if self.state.current_filename() and not self.is_file_visible(self.state.current_filename()):
+            self.navigate_list(1)
+
+    def toggle_show_selected(self, checked: bool):
+        if checked:
+            # A vibrant orange to indicate the filter is active.
+            self.show_selected_button.setStyleSheet("""
+                background-color: #FFA500;
+                color: white;
+                font-weight: bold;
+                border: 1px solid #D35400;
+            """)
+        else:
+            # Revert to the default stylesheet to match other buttons.
+            self.show_selected_button.setStyleSheet("")
+
+        self.show_selected_only_active = checked
+        # This is instantaneous because we're just checking against the selected_files set
+        self.refresh_file_list()
+        # If the current item is now hidden, find the next visible one
+        if self.state.current_filename() and not self.is_file_visible(self.state.current_filename()):
+            self.navigate_list(1)
+
     def is_file_visible(self, fname_to_check: str) -> bool:
         """Checks if a file should be visible based on active filters."""
-        if not self.high_coverage_filter_active:
+        if not self.high_coverage_filter_active and not self.high_mask_count_filter_active and not self.show_selected_only_active:
             return True
 
-        # This check is now very fast as coverage is pre-calculated and cached at load time.
+        # Check selected filter first since it's the fastest (just a set lookup)
+        if self.show_selected_only_active and fname_to_check not in self.state.selected_files:
+            return False
+
+        # These checks are very fast as coverage and mask count are pre-calculated and cached at load time.
         coverage = self.state.coverage_cache.get(fname_to_check)
-        return coverage is not None and coverage > 90
+        mask_count = self.state.mask_count_cache.get(fname_to_check)
+
+        if self.high_coverage_filter_active:
+            if coverage is None or coverage <= 98:
+                return False
+        if self.high_mask_count_filter_active:
+            if mask_count is None or mask_count <= 10:
+                return False
+        return True
 
     def keyPressEvent(self, event: QKeyEvent):
         if not self.state.dataset.file_list or not self.state.current_filename():
@@ -500,7 +590,11 @@ class AnnotationSelector(QMainWindow):
         # Update the dedicated coverage label
         coverage = self.state.coverage_cache.get(fname)
         if coverage is not None:
-            self.coverage_label.setText(f"Coverage: {coverage:.2f}%")
+            # Calculate average coverage of selected images
+            selected_coverages = [self.state.coverage_cache.get(f, 0) for f in self.state.selected_files]
+            avg_coverage = sum(selected_coverages) / len(selected_coverages) if selected_coverages else 0
+            
+            self.coverage_label.setText(f"Coverage: {coverage:.2f}%\nAvg. Sel. Coverage: {avg_coverage:.2f}%")
             self.coverage_label.show()
         else:
             # Hide the label if there's no coverage data to avoid showing "N/A"
@@ -556,26 +650,6 @@ class AnnotationSelector(QMainWindow):
         self.count_label.setText(f"Selected: {selected} / {total}")
 
         self.file_list_widget.blockSignals(False)
-
-    def toggle_coverage_filter(self, checked: bool):
-        if checked:
-            # A vibrant orange to indicate the filter is active.
-            self.coverage_filter_button.setStyleSheet("""
-                background-color: #FFA500;
-                color: white;
-                font-weight: bold;
-                border: 1px solid #D35400;
-            """)
-        else:
-            # Revert to the default stylesheet to match other buttons.
-            self.coverage_filter_button.setStyleSheet("")
-
-        self.high_coverage_filter_active = checked
-        # This is now instantaneous because coverage data is pre-cached at load time.
-        self.refresh_file_list()
-        # If the current item is now hidden, find the next visible one
-        if self.state.current_filename() and not self.is_file_visible(self.state.current_filename()):
-            self.navigate_list(1)
 
     def apply_view_filters(self):
         """Hides or shows items in the file list based on active filters."""
@@ -797,6 +871,12 @@ class AnnotationSelector(QMainWindow):
         <b>Images & Masks:</b><br>
         - Click on the main image or mask to open an enlarged view.<br>
         - In the right-hand label panel, click a label to isolate its corresponding mask. Click the same label again to restore the full view.<br><br>
+
+        <b>Filtering:</b><br>
+        - Use <b>Coverage > 98%</b> to show only images with high annotation coverage.<br>
+        - Use <b>Masks > 10</b> to show only images with more than 10 masks.<br>
+        - Use <b>Show Selected</b> to display only the images you have selected.<br>
+        - Filters can be combined to find images that meet multiple criteria.<br><br>
 
         <b>Video Datasets:</b><br>
         - For video datasets, files are grouped by video ID in the list.<br>

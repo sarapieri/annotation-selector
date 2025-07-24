@@ -21,6 +21,7 @@ class AppState:
         
         self.image_cache = {}
         self.coverage_cache = {}
+        self.mask_count_cache = {}
         initial_dataset_name = list(self.datasets.keys())[0]
         # Set initial dataset and load its data (blocking)
         self.change_dataset(initial_dataset_name)
@@ -80,6 +81,7 @@ class AppState:
         if hasattr(self, 'image_cache'):
             self.image_cache.clear()
         self.coverage_cache.clear()
+        self.mask_count_cache.clear()
 
     def load_active_dataset_data(self):
         """
@@ -107,6 +109,13 @@ class AppState:
             # This is very fast as the dataset already calculated these values during its .load() method.
             if hasattr(self.dataset, 'coverages'):
                 self.coverage_cache = self.dataset.coverages.copy()
+            
+            # Pre-populate the mask count cache for instantaneous filtering
+            if hasattr(self.dataset, 'segments_info'):
+                self.mask_count_cache = {
+                    frame_key: len(segments_info)
+                    for frame_key, segments_info in self.dataset.segments_info.items()
+                }
 
     def _load_and_cache_image(self, fname):
         if not fname:
