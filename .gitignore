@@ -19,3 +19,5 @@ exports/
 detectron2/
 detectron2.zip
 config.json 
+exports_*
+verification_summary.txt

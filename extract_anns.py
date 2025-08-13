@@ -55,12 +55,51 @@ def process_selection_file(selection_file, all_datasets_config):
 
     print(f" Found {len(selected_files)} files to export for '{dataset_name}'")
 
-    # 5. Output directory
+    # 5. Check if this is a previous file (already extracted)
+    is_previous_file = "previous" in selection_file
+    
+    if is_previous_file:
+        print(f" This is a previous selection file - all {len(selected_files)} files were already extracted.")
+        print(" No new extractions needed.")
+        return
+
+    # 6. Check for previous extractions
+    previous_selection_file = os.path.join("selected_annotations", "previous", base_name)
+    previously_extracted_files = set()
+    
+    if os.path.exists(previous_selection_file):
+        try:
+            with open(previous_selection_file, "r") as f:
+                previous_data = json.load(f)
+            
+            if isinstance(previous_data, dict) and "selected_files" in previous_data:
+                previously_extracted_files = set(previous_data["selected_files"])
+            elif isinstance(previous_data, list):
+                previously_extracted_files = set(previous_data)
+                
+            print(f" Found {len(previously_extracted_files)} previously extracted files")
+        except Exception as e:
+            print(f" Warning: Could not read previous selection file: {e}")
+    
+    # 7. Filter out already extracted files
+    new_files_to_extract = [f for f in selected_files if f not in previously_extracted_files]
+    already_extracted_count = len(selected_files) - len(new_files_to_extract)
+    
+    if already_extracted_count > 0:
+        print(f" {already_extracted_count} files already extracted, skipping")
+    
+    if not new_files_to_extract:
+        print(f" All {len(selected_files)} files were already extracted. Nothing new to extract.")
+        return
+    
+    print(f" Will extract {len(new_files_to_extract)} new files")
+
+    # 8. Output directory
     output_base_dir = "exports"
     dataset_export_dir = os.path.join(output_base_dir, dataset_name)
     os.makedirs(dataset_export_dir, exist_ok=True)
 
-    for frame_key in tqdm(selected_files, desc=f"Exporting {dataset_name}"):
+    for frame_key in tqdm(new_files_to_extract, desc=f"Exporting {dataset_name}"):
         try:
             if dataset.is_video_dataset:
                 if '/' not in frame_key:
@@ -79,7 +118,7 @@ def process_selection_file(selection_file, all_datasets_config):
             os.makedirs(output_item_dir, exist_ok=True)
 
             # Load visualized data using the unique frame_key
-            original_qimg, mask_qimg, labels = dataset.load_image(frame_key)
+            original_qimg, mask_qimg, id_to_label = dataset.load_image(frame_key)
 
             # a) Save original image by reconstructing its path
             jpg_fname = f"{base_name}.jpg"
@@ -98,16 +137,18 @@ def process_selection_file(selection_file, all_datasets_config):
             if not mask_qimg.save(mask_output_path):
                 raise IOError(f"Failed to save mask overlay to {mask_output_path}")
 
-            # c) Save label list
+            # c) Save label list - use the filtered labels that match the visualization
             labels_txt_path = os.path.join(output_item_dir, "labels.txt")
             with open(labels_txt_path, "w") as f:
-                f.write("\n".join(labels[:-1]))  # Exclude coverage
+                f.write("\n".join(id_to_label))
 
         except Exception as e:
             print(f"\nWarning: Could not process '{frame_key}'. Skipping. Error: {e}")
             continue
 
-    print(f" Finished exporting {len(selected_files)} items to '{dataset_export_dir}'")
+    print(f" Finished exporting {len(new_files_to_extract)} new items to '{dataset_export_dir}'")
+    if already_extracted_count > 0:
+        print(f" Skipped {already_extracted_count} already extracted items")
 
 
 def main():
@@ -136,11 +177,16 @@ def main():
     else:
         if not os.path.isdir(selection_dir):
             sys.exit(f" Selection directory not found: {selection_dir}")
+        
+        # Look for current selection files (excluding the previous/ subdirectory)
         files_to_process = [
             os.path.join(selection_dir, f)
             for f in os.listdir(selection_dir)
-            if f.startswith("selected_") and f.endswith(".json")
+            if f.startswith("selected_") and f.endswith(".json") and f != "previous"
         ]
+        
+        if not files_to_process:
+            sys.exit(" No current selection files found to process.")
 
     if not files_to_process:
         sys.exit(" No selection files found to process.")

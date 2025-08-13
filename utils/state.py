@@ -33,7 +33,15 @@ class AppState:
                 config = json.load(f)
             
             for name, params in config.get("datasets", {}).items():
-                datasets[name] = PanopticDataset(name=name, **params)
+                # Extract caption_dir if present, but don't pass it to PanopticDataset constructor
+                caption_dir = params.pop('caption_dir', None)
+                dataset = PanopticDataset(name=name, **params)
+                
+                # Set caption directory after creation if specified
+                if caption_dir:
+                    dataset.caption_dir = caption_dir
+                
+                datasets[name] = dataset
 
         except FileNotFoundError:
             print("Warning: config.json not found. Please create it from config.json. template and add your dataset paths.")
@@ -90,6 +98,11 @@ class AppState:
         """
         if self.dataset:
             self.dataset.load()
+            
+            # Load captions if caption directory is specified in config
+            if hasattr(self.dataset, 'caption_dir') and self.dataset.caption_dir:
+                self.dataset.set_caption_dir(self.dataset.caption_dir)
+            
             # Ensure the file list is always in a predictable, natural order
             if hasattr(self.dataset, 'file_list') and self.dataset.file_list:
                 # For video datasets, sort by video ID first, then by frame filename
@@ -138,3 +151,17 @@ class AppState:
         fname = fname or self.current_filename()
         _, _, labels = self._load_and_cache_image(fname)
         return labels
+
+    def get_caption(self, fname=None):
+        """Get caption for a specific frame if available"""
+        fname = fname or self.current_filename()
+        if hasattr(self.dataset, 'get_caption'):
+            return self.dataset.get_caption(fname)
+        return ""
+
+    def has_caption_for_frame(self, fname=None):
+        """Check if a frame has an associated caption"""
+        fname = fname or self.current_filename()
+        if hasattr(self.dataset, 'has_caption_for_frame'):
+            return self.dataset.has_caption_for_frame(fname)
+        return False

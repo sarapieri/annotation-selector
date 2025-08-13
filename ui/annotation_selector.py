@@ -2,6 +2,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QPushButton, QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator,
     QVBoxLayout, QHBoxLayout, QComboBox, QMessageBox,
     QProgressBar, QToolButton, QAbstractItemView,
+    QTextEdit,
 )
 from PyQt6.QtGui import QPixmap, QKeyEvent, QGuiApplication
 from PyQt6.QtCore import Qt, QThread
@@ -30,6 +31,7 @@ class AnnotationSelector(QMainWindow):
         self.high_coverage_filter_active = False
         self.high_mask_count_filter_active = False
         self.show_selected_only_active = False
+        self.show_captioned_only_active = False
         self.frame_key_to_item_map = {}
         self.coverage_label = None
 
@@ -52,6 +54,7 @@ class AnnotationSelector(QMainWindow):
         main_layout = QVBoxLayout()
         top_layout = QHBoxLayout()
         button_layout = QHBoxLayout()
+        button_layout.setSpacing(5)  # Reduce spacing between buttons
 
         self.dataset_selector = QComboBox()
         self.dataset_selector.addItems(self.state.datasets.keys())
@@ -129,17 +132,20 @@ class AnnotationSelector(QMainWindow):
         self.save_button = QPushButton("Save 💾")
         self.load_button = QPushButton("Load 📂")
         self.clear_button = QPushButton("Clear ✖")
-        self.stats_button = QPushButton("Show Stats 📊")
-        self.play_video_button = QPushButton("Play Video ▶️")
+        self.stats_button = QPushButton("Stats 📊")
+        self.play_video_button = QPushButton("Video ▶️")
 
-        self.coverage_filter_button = QPushButton("Coverage > 98%")
+        self.coverage_filter_button = QPushButton("Coverage") # > 98%
         self.coverage_filter_button.setCheckable(True)
 
         self.mask_count_filter_button = QPushButton("Masks > 10")
         self.mask_count_filter_button.setCheckable(True)
 
-        self.show_selected_button = QPushButton("Show Selected")
+        self.show_selected_button = QPushButton("Selected")
         self.show_selected_button.setCheckable(True)
+
+        self.show_captioned_button = QPushButton("Captioned")
+        self.show_captioned_button.setCheckable(True)
 
         self.select_button.clicked.connect(self.select_current)
         self.deselect_button.clicked.connect(self.deselect_current)
@@ -151,6 +157,10 @@ class AnnotationSelector(QMainWindow):
         self.coverage_filter_button.toggled.connect(self.toggle_coverage_filter)
         self.mask_count_filter_button.toggled.connect(self.toggle_mask_count_filter)
         self.show_selected_button.toggled.connect(self.toggle_show_selected)
+        self.show_captioned_button.toggled.connect(self.toggle_show_captioned)
+        
+        # Caption editing state
+        self.is_editing_caption = False
 
         button_layout.addWidget(self.select_button)
         button_layout.addWidget(self.deselect_button)
@@ -162,6 +172,7 @@ class AnnotationSelector(QMainWindow):
         button_layout.addWidget(self.coverage_filter_button)
         button_layout.addWidget(self.mask_count_filter_button)
         button_layout.addWidget(self.show_selected_button)
+        button_layout.addWidget(self.show_captioned_button)
 
         self.file_list_widget = QTreeWidget()
         self.file_list_widget.setHeaderHidden(True)
@@ -207,8 +218,70 @@ class AnnotationSelector(QMainWindow):
         main_layout.addLayout(top_layout)
         main_layout.addWidget(self.image_id_label)
         main_layout.addLayout(image_row)
+        
+        # Add caption display widget below images
+        caption_container = QWidget()
+        caption_container.setFixedHeight(180)  # Fixed height to prevent expansion
+        caption_container.setStyleSheet("""
+            QWidget {
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                background-color: #f8f9fa;
+                padding: 8px;
+            }
+        """)
+        
+        caption_layout = QHBoxLayout(caption_container)
+        caption_layout.setContentsMargins(8, 8, 8, 8)
+        caption_layout.setSpacing(10)
+        
+        self.caption_text = QTextEdit()
+        self.caption_text.setReadOnly(True)
+        self.caption_text.setPlaceholderText("No caption available")
+        self.caption_text.setMaximumHeight(150)
+        self.caption_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #ffffff;
+                border: 1px solid #dee2e6;
+                border-radius: 4px;
+                padding: 8px;
+                margin: 0px;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 13px;
+                line-height: 1.4;
+                color: #212529;
+                font-weight: 500;
+            }
+        """)
+        
+        # Caption edit and save buttons
+        caption_buttons_layout = QVBoxLayout()
+        caption_buttons_layout.setSpacing(8)
+        caption_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        caption_buttons_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)  # Center vertically
+        
+        self.edit_caption_button = QPushButton("Edit ✏️")
+        self.edit_caption_button.setFixedWidth(70)
+        self.edit_caption_button.setFixedHeight(35)
+        self.save_caption_button = QPushButton("Save 💾")
+        self.save_caption_button.setFixedWidth(70)
+        self.save_caption_button.setFixedHeight(35)
+        self.save_caption_button.setEnabled(False)  # Initially disabled
+        
+        self.edit_caption_button.clicked.connect(self.edit_caption)
+        self.save_caption_button.clicked.connect(self.save_caption)
+        
+        caption_buttons_layout.addStretch()  # Push buttons to center
+        caption_buttons_layout.addWidget(self.edit_caption_button)
+        caption_buttons_layout.addWidget(self.save_caption_button)
+        caption_buttons_layout.addStretch()  # Push buttons to center
+        
+        caption_layout.addWidget(self.caption_text, stretch=1)
+        caption_layout.addLayout(caption_buttons_layout)
+        
+        main_layout.addWidget(caption_container)
+        
         main_layout.addLayout(button_layout)
-
         main_layout.addWidget(QLabel("Files:"))
         main_layout.addWidget(self.file_list_widget)
 
@@ -502,13 +575,37 @@ class AnnotationSelector(QMainWindow):
         if self.state.current_filename() and not self.is_file_visible(self.state.current_filename()):
             self.navigate_list(1)
 
+    def toggle_show_captioned(self, checked: bool):
+        if checked:
+            # A vibrant orange to indicate the filter is active.
+            self.show_captioned_button.setStyleSheet("""
+                background-color: #FFA500;
+                color: white;
+                font-weight: bold;
+                border: 1px solid #D35400;
+            """)
+        else:
+            # Revert to the default stylesheet to match other buttons.
+            self.show_captioned_button.setStyleSheet("")
+
+        self.show_captioned_only_active = checked
+        # This is instantaneous because we're just checking against the captions cache
+        self.refresh_file_list()
+        # If the current item is now hidden, find the next visible one
+        if self.state.current_filename() and not self.is_file_visible(self.state.current_filename()):
+            self.navigate_list(1)
+
     def is_file_visible(self, fname_to_check: str) -> bool:
         """Checks if a file should be visible based on active filters."""
-        if not self.high_coverage_filter_active and not self.high_mask_count_filter_active and not self.show_selected_only_active:
+        if not self.high_coverage_filter_active and not self.high_mask_count_filter_active and not self.show_selected_only_active and not self.show_captioned_only_active:
             return True
 
         # Check selected filter first since it's the fastest (just a set lookup)
         if self.show_selected_only_active and fname_to_check not in self.state.selected_files:
+            return False
+
+        # Check captioned filter
+        if self.show_captioned_only_active and not self.state.has_caption_for_frame(fname_to_check):
             return False
 
         # These checks are very fast as coverage and mask count are pre-calculated and cached at load time.
@@ -516,7 +613,7 @@ class AnnotationSelector(QMainWindow):
         mask_count = self.state.mask_count_cache.get(fname_to_check)
 
         if self.high_coverage_filter_active:
-            if coverage is None or coverage <= 98:
+            if coverage is None or coverage <= 95: # or coverage <= 98:
                 return False
         if self.high_mask_count_filter_active:
             if mask_count is None or mask_count <= 10:
@@ -539,6 +636,12 @@ class AnnotationSelector(QMainWindow):
                 self.deselect_current()
             else:
                 self.select_current()
+        elif key == Qt.Key.Key_E and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            # Ctrl+E to edit caption
+            self.edit_caption()
+        elif key == Qt.Key.Key_S and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            # Ctrl+S to save caption
+            self.save_caption()
         else:
             super().keyPressEvent(event)
 
@@ -568,6 +671,10 @@ class AnnotationSelector(QMainWindow):
         # Store the full mask and reset the selected label for the new image
         self.full_panoptic_mask = mask_img
         self.selected_label_item = None
+        
+        # Reset caption editing state for new image
+        if self.is_editing_caption:
+            self._exit_caption_edit_mode()
 
         self.original_image.setPixmap(QPixmap.fromImage(orig_img))
         self.original_image.update_scaled_pixmap()
@@ -599,6 +706,23 @@ class AnnotationSelector(QMainWindow):
         else:
             # Hide the label if there's no coverage data to avoid showing "N/A"
             self.coverage_label.hide()
+
+        # Update caption display if available
+        caption = self.state.get_caption(fname)
+        if caption and caption.strip():
+            # Show full caption in the scrollable text area
+            self.caption_text.setPlainText(f"Caption: {caption}")
+            self.caption_text.setToolTip(caption)  # Full caption in tooltip
+            self.caption_text.show()
+        else:
+            self.caption_text.clear()
+            self.caption_text.setToolTip("")
+            
+        # Update caption button states
+        has_caption = self.state.has_caption_for_frame()
+        self.edit_caption_button.setEnabled(has_caption)
+        if not has_caption and self.is_editing_caption:
+            self._exit_caption_edit_mode()
 
         file_list = self.state.dataset.file_list
         if file_list:
@@ -857,6 +981,106 @@ class AnnotationSelector(QMainWindow):
             QMessageBox.warning(self, "Invalid Frame", f"Could not determine video ID from frame: {frame_key}")
 
 
+    def edit_caption(self):
+        """Enable editing of the current caption."""
+        if not self.state.current_filename() or self.is_editing_caption:
+            return
+            
+        # Check if caption editing is available
+        if not self.state.has_caption_for_frame():
+            QMessageBox.warning(self, "No Caption", "This image has no caption to edit.")
+            return
+            
+        # Get the current caption text without the "Caption: " prefix
+        current_caption = self.caption_text.toPlainText().replace("Caption: ", "")
+        
+        # Enable editing mode
+        self.caption_text.setReadOnly(False)
+        self.caption_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #ffffff;
+                border: 2px solid #007bff;
+                border-radius: 4px;
+                padding: 8px;
+                margin: 5px 0px;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 13px;
+                line-height: 1.4;
+                color: #212529;
+                font-weight: 500;
+            }
+        """)
+        
+        # Set the text to just the caption content (no prefix)
+        self.caption_text.setPlainText(current_caption)
+        
+        # Update button states
+        self.edit_caption_button.setEnabled(False)
+        self.save_caption_button.setEnabled(True)
+        self.is_editing_caption = True
+        
+        # Focus and select text for editing
+        self.caption_text.setFocus()
+        self.caption_text.selectAll()
+
+    def save_caption(self):
+        """Save the edited caption to the same location it was read from."""
+        if not self.is_editing_caption:
+            return
+            
+        current_fname = self.state.current_filename()
+        if not current_fname:
+            return
+            
+        # Get the new caption text (remove "Caption: " prefix if it exists)
+        new_caption = self.caption_text.toPlainText().replace("Caption: ", "")
+        
+        # Ask for confirmation
+        confirm = QMessageBox.question(
+            self, "Confirm Save",
+            f"Are you sure you want to save the modified caption?\n\n"
+            f"This will overwrite the caption file for: {current_fname}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if confirm == QMessageBox.StandardButton.No:
+            return
+            
+        try:
+            # Save using dataset method
+            self.state.dataset.save_caption(current_fname, new_caption)
+            
+            # Exit editing mode
+            self._exit_caption_edit_mode()
+            QMessageBox.information(self, "Success", "Caption saved successfully!")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Failed to save caption:\n{str(e)}")
+
+    def _exit_caption_edit_mode(self):
+        """Helper method to exit caption editing mode."""
+        self.caption_text.setReadOnly(True)
+        self.caption_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 4px;
+                padding: 8px;
+                margin: 5px 0px;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 13px;
+                line-height: 1.4;
+                color: #212529;
+                font-weight: 500;
+            }
+        """)
+        
+        # Update button states
+        self.edit_caption_button.setEnabled(True)
+        self.save_caption_button.setEnabled(False)
+        self.is_editing_caption = False
+
     def show_help(self):
         help_text = """
         <b>How to Use Annotation Selector</b><br><br>
@@ -872,10 +1096,17 @@ class AnnotationSelector(QMainWindow):
         - Click on the main image or mask to open an enlarged view.<br>
         - In the right-hand label panel, click a label to isolate its corresponding mask. Click the same label again to restore the full view.<br><br>
 
+        <b>Caption Editing:</b><br>
+        - Click <b>Edit Caption ✏️</b> or press <b>Ctrl+E</b> to modify the current image's caption.<br>
+        - Click <b>Save Caption 💾</b> or press <b>Ctrl+S</b> to save your changes to the original file.<br>
+        - You'll be asked to confirm before overwriting the original caption file.<br>
+        - Note: Caption editing is only available when a caption directory is configured for the dataset.<br><br>
+
         <b>Filtering:</b><br>
         - Use <b>Coverage > 98%</b> to show only images with high annotation coverage.<br>
         - Use <b>Masks > 10</b> to show only images with more than 10 masks.<br>
         - Use <b>Show Selected</b> to display only the images you have selected.<br>
+        - Use <b>Show Captioned</b> to display only images that have captions.<br>
         - Filters can be combined to find images that meet multiple criteria.<br><br>
 
         <b>Video Datasets:</b><br>
@@ -884,7 +1115,7 @@ class AnnotationSelector(QMainWindow):
 
         <b>Saving & Loading:</b><br>
         - <b>Save 💾</b> stores your selections to a JSON file.<br>
-        - <b>Load 📂</b> restores selections from the file if it exists.<br>
+        - <b>Load 📂</b> restores selections from the current dataset.<br>
         - <b>Clear ✖</b> resets all selections for the current dataset.<br>
         - Selections are saved to: <code>selected_annotations/selected_{dataset_name}.json</code><br><br>
 

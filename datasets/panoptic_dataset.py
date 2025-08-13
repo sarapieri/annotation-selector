@@ -20,9 +20,11 @@ class PanopticDataset(BaseDataset):
         self.image_dir = image_dir
         self.ann_file = ann_file
         self.mask_dir = mask_dir
+        self.caption_dir = None  # Optional caption directory
         self.is_video_dataset = False
         self.visualizer_segments = {}
         self.font_size = 25 if "VIPSeg" in name else 10
+        self.captions = {}  # frame_key -> caption text
 
     def load(self):
         print(f"Loading {self.name} dataset... This may take a few seconds.")
@@ -157,6 +159,133 @@ class PanopticDataset(BaseDataset):
             print(f"Skipped {skipped_duplicates} duplicate entries.")
         if skipped_missing_files > 0:
             print(f"Warning: Skipped {skipped_missing_files} entries due to missing image or mask files.")
+
+    def set_caption_dir(self, caption_dir):
+        """Set the caption directory and optionally load captions"""
+        self.caption_dir = caption_dir
+        if caption_dir and os.path.exists(caption_dir):
+            self._load_captions()
+
+    def _load_captions(self):
+        """Load captions from the caption directory if available"""
+        if not self.caption_dir or not os.path.exists(self.caption_dir):
+            return
+
+        print(f"Loading captions from {self.caption_dir}...")
+        json_files = [f for f in os.listdir(self.caption_dir) if f.endswith('.json')]
+        loaded_count = 0
+
+        for filename in json_files:
+            file_path = os.path.join(self.caption_dir, filename)
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                if 'text' not in data:
+                    continue
+                
+                caption_value = data['text']
+                if not isinstance(caption_value, str):
+                    continue
+
+                image_id = os.path.splitext(filename)[0]
+                matched_key = None
+
+                if self.is_video_dataset:
+                    # Parse video caption filename: <video_id>_<frame_id>.json
+                    video_id, sep, frame_base = image_id.rpartition('_')
+                    if sep == '' or not frame_base:
+                        continue
+                    
+                    # Look for exact match in file_list
+                    for frame_key in self.file_list:
+                        if frame_key == f"{video_id}/{frame_base}.png" or frame_key == f"{video_id}/{frame_base}.jpg":
+                            matched_key = frame_key
+                            break
+                else:
+                    # Image dataset: try numeric conversion first
+                    try:
+                        base_name = f"{int(image_id):012d}"
+                        for frame_key in self.file_list:
+                            if frame_key == f"{base_name}.jpg" or frame_key == f"{base_name}.png":
+                                matched_key = frame_key
+                                break
+                    except ValueError:
+                        # Non-numeric ID, try direct match
+                        for frame_key in self.file_list:
+                            if frame_key == f"{image_id}.jpg" or frame_key == f"{image_id}.png":
+                                matched_key = frame_key
+                                break
+
+                if matched_key and matched_key not in self.captions:
+                    self.captions[matched_key] = caption_value
+                    loaded_count += 1
+
+            except Exception as e:
+                continue  # Skip files with errors
+
+        print(f"Loaded {loaded_count} captions for {self.name}")
+
+    def get_caption(self, frame_key):
+        """Get caption for a specific frame if available"""
+        return self.captions.get(frame_key, "")
+
+    def has_caption_for_frame(self, frame_key):
+        """Check if a frame has an associated caption"""
+        return frame_key in self.captions
+
+    def get_all_captions(self):
+        """Get all captions"""
+        return self.captions.copy()
+
+    def update_caption_cache(self, frame_key, new_caption):
+        """Update the caption cache with a new caption value."""
+        self.captions[frame_key] = new_caption
+
+    def get_caption_file_path(self, frame_key):
+        """Get the file path for a caption file."""
+        if not self.caption_dir:
+            return None
+            
+        if self.is_video_dataset:
+            # For video datasets, frame_key is "video_id/fname.ext"
+            video_id, fname = frame_key.split('/', 1)
+            base_name, _ = os.path.splitext(fname)
+            caption_filename = f"{video_id}_{base_name}.json"
+        else:
+            # For image datasets, frame_key is "fname.ext"
+            base_name, _ = os.path.splitext(frame_key)
+            
+            # Remove leading zeros for numeric IDs to match the loading pattern
+            try:
+                # Try to convert to int and back to remove leading zeros
+                numeric_id = int(base_name)
+                caption_filename = f"{numeric_id}.json"
+            except ValueError:
+                # If not numeric, use as-is
+                caption_filename = f"{base_name}.json"
+            
+        return os.path.join(self.caption_dir, caption_filename)
+
+    def save_caption(self, frame_key, new_caption):
+        """Save a caption to the caption directory."""
+        if not self.caption_dir:
+            raise ValueError("No caption directory configured")
+            
+        caption_file_path = self.get_caption_file_path(frame_key)
+        if not caption_file_path:
+            raise ValueError("Could not determine caption file path")
+            
+        # Ensure the caption directory exists
+        os.makedirs(os.path.dirname(caption_file_path), exist_ok=True)
+        
+        # Save the new caption in JSON format
+        caption_data = {"text": new_caption}
+        with open(caption_file_path, 'w', encoding='utf-8') as f:
+            json.dump(caption_data, f, indent=2, ensure_ascii=False)
+            
+        # Update the cache
+        self.update_caption_cache(frame_key, new_caption)
 
     def _get_label_name(self, cat_id):  
         cat = self.categories.get(cat_id)
