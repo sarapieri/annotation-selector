@@ -285,6 +285,27 @@ class CaptionPanopticDataset(PanopticDataset):
         
         return sorted(list(mask_ids))
 
+    def ensure_visualizer_segments_loaded(self):
+        """Ensure visualizer segments are loaded for all frames with captions"""
+        if not self.has_captions:
+            return
+        
+        print(f"Loading visualizer segments for {len(self.captions)} frames...")
+        loaded_count = 0
+        error_count = 0
+        
+        for frame_key in self.captions.keys():
+            if frame_key not in self.visualizer_segments:
+                try:
+                    self.load_image(frame_key)
+                    loaded_count += 1
+                except Exception as e:
+                    print(f"Warning: Could not load image for {frame_key}: {e}")
+                    error_count += 1
+        
+        print(f"Loaded visualizer segments for {loaded_count} frames, {error_count} errors")
+        return loaded_count, error_count
+
     def check_caption_completeness(self):
         """Check if captions mention all masks in each image"""
         if not self.has_captions:
@@ -296,6 +317,9 @@ class CaptionPanopticDataset(PanopticDataset):
                 "completeness_stats": {}
             }
         
+        # Ensure visualizer segments are loaded for all frames
+        self.ensure_visualizer_segments_loaded()
+        
         total_images_with_captions = len(self.captions)
         images_with_incomplete_captions = 0
         images_with_complete_captions = 0
@@ -303,9 +327,9 @@ class CaptionPanopticDataset(PanopticDataset):
         completeness_stats = {}
         
         for frame_key, caption_text in self.captions.items():
-            # Get the number of masks for this image
-            segments_info = self.segments_info.get(frame_key, [])
-            total_masks = len(segments_info)
+            # Get the filtered segments that are actually used for visualization
+            vis_segments = self.visualizer_segments.get(frame_key, [])
+            total_masks = len(vis_segments)
             
             if total_masks == 0:
                 continue  # Skip images with no masks
@@ -324,7 +348,8 @@ class CaptionPanopticDataset(PanopticDataset):
                 "referenced_mask_ids": referenced_mask_ids,
                 "missing_mask_ids": sorted(list(missing_mask_ids)),
                 "is_complete": is_complete,
-                "caption_text": caption_text[:100] + "..." if len(caption_text) > 100 else caption_text
+                "caption_text": caption_text[:100] + "..." if len(caption_text) > 100 else caption_text,
+                "using_visualizer_segments": True
             }
             
             if is_complete:

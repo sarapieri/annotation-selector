@@ -11,6 +11,7 @@ Here's what the Annotation Selector looks like in action:
 
 - [x] Increase dataset support (added VIPSeg, COCONut, ADE20K)
 - [ ] ❗ Update installation procedures (below raw version)
+- [ ] ❗ Update README new functionalities
 
 
 ## ✨ Features

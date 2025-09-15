@@ -13,6 +13,7 @@ import random
 from tqdm import tqdm
 random.seed(42)
 np.random.seed(42)
+from pycocotools import mask as mask_util
 
 class PanopticDataset(BaseDataset):
     def __init__(self, name, image_dir, ann_file, mask_dir):
@@ -25,6 +26,7 @@ class PanopticDataset(BaseDataset):
         self.visualizer_segments = {}
         self.font_size = 25 if "VIPSeg" in name else 10
         self.captions = {}  # frame_key -> caption text
+        self.visualization_labels = {}  # frame_key -> list of label strings
 
     def load(self):
         print(f"Loading {self.name} dataset... This may take a few seconds.")
@@ -80,6 +82,9 @@ class PanopticDataset(BaseDataset):
         processed_items = set()
         skipped_duplicates = 0
         skipped_missing_files = 0
+        empty_mask_files = 0
+        segments_without_pixels = 0
+        total_segments_checked = 0
 
         for frame in tqdm(annotations_list, desc=f"Processing {self.name}"):
             fname = frame['file_name']
@@ -133,6 +138,25 @@ class PanopticDataset(BaseDataset):
                 total_pixels = panoptic_seg.shape[0] * panoptic_seg.shape[1]
                 coverage = (labeled_pixels / total_pixels) * 100
 
+                # Check for completely empty masks
+                if labeled_pixels == 0:
+                    empty_mask_files += 1
+                    print(f"Warning: Frame '{frame_key}' has an empty mask (no labeled pixels)")
+
+                # Check which segments actually exist in the mask
+                existing_ids = set(np.unique(panoptic_seg))
+                if 0 in existing_ids:  # Remove background ID if present
+                    existing_ids.remove(0)
+                
+                # Count segments that don't exist in the mask
+                segments_in_annotation = set(seg['id'] for seg in segments_info)
+                segments_not_in_mask = segments_in_annotation - existing_ids
+                if segments_not_in_mask:
+                    segments_without_pixels += len(segments_not_in_mask)
+                    print(f"Warning: Frame '{frame_key}' has {len(segments_not_in_mask)} segments in annotation but not in mask: {segments_not_in_mask}")
+                
+                total_segments_checked += len(segments_info)
+
                 self.segments_info[frame_key] = segments_info
                 self.file_list.append(frame_key)
                 self.labels[frame_key] = labels
@@ -159,6 +183,12 @@ class PanopticDataset(BaseDataset):
             print(f"Skipped {skipped_duplicates} duplicate entries.")
         if skipped_missing_files > 0:
             print(f"Warning: Skipped {skipped_missing_files} entries due to missing image or mask files.")
+        if empty_mask_files > 0:
+            print(f"Warning: Found {empty_mask_files} frames with completely empty masks (no labeled pixels).")
+        if segments_without_pixels > 0:
+            print(f"Warning: Found {segments_without_pixels} segments in annotations that don't exist in their corresponding masks.")
+        if total_segments_checked > 0:
+            print(f"Mask quality: {segments_without_pixels}/{total_segments_checked} segments ({segments_without_pixels/total_segments_checked*100:.1f}%) have annotation-mask mismatches.")
 
     def set_caption_dir(self, caption_dir):
         """Set the caption directory and optionally load captions"""
@@ -276,7 +306,7 @@ class PanopticDataset(BaseDataset):
         if not caption_file_path:
             raise ValueError("Could not determine caption file path")
             
-        # Ensure the caption directory exists
+        # Ensure the caption directory exists (create if it doesn't exist)
         os.makedirs(os.path.dirname(caption_file_path), exist_ok=True)
         
         # Save the new caption in JSON format
@@ -339,6 +369,7 @@ class PanopticDataset(BaseDataset):
         stuff_classes = []
         thing_idx = 0
         stuff_idx = 0
+        label_list = []
 
         for seg in segments_info:
             if seg['id'] not in existing_ids:
@@ -354,6 +385,7 @@ class PanopticDataset(BaseDataset):
             # Create the label string with the correct global index
             label_str = f"{len(id_to_label)}"
             id_to_label.append(f"{len(id_to_label)}: {name}")
+            label_list.append(name)
 
             # Remap category_id for Visualizer
             if is_thing:
@@ -379,10 +411,81 @@ class PanopticDataset(BaseDataset):
             segments_info=filtered_segments
         )
         self.visualizer_segments[frame_key] = filtered_segments
+        self.visualization_labels[frame_key] = label_list
         vis_img = vis_output.get_image()
         qimage = QImage(vis_img.data, vis_img.shape[1], vis_img.shape[0], vis_img.strides[0], QImage.Format.Format_RGB888)
 
         return QImage(image_path), qimage, id_to_label
+    
+    def load_image_annotation(self, frame_key, start_annotation_id):
+        image_path, mask_path, metadata_key = self._get_paths_and_key(frame_key)
+
+        image = Image.open(image_path).convert("RGB")
+        mask = np.array(Image.open(mask_path))
+        panoptic_seg = rgb2id(mask).astype(np.int32)
+
+        segments_info = self.segments_info.get(frame_key)
+        if segments_info is None:
+            raise ValueError(f"No segments found for {frame_key}")
+
+        # Get the set of segment IDs that actually exist in the mask
+        existing_ids = set(np.unique(panoptic_seg))
+        if 0 in existing_ids:  # Remove background ID if present
+            existing_ids.remove(0)
+
+        # Filter segments_info to only include segments that exist in the mask
+        annotations = []
+        annotation_id = start_annotation_id
+        
+        for seg in segments_info:
+            if seg['id'] not in existing_ids:
+                continue  # Skip segments that don't exist in the mask
+
+            cat_id = seg["category_id"]
+
+            # Create binary mask for this segment
+            segment_mask = (panoptic_seg == seg['id']).astype(np.uint8)
+            
+            # Check if mask has any pixels
+            if np.sum(segment_mask) == 0:
+                continue  # Skip empty masks
+            
+            try:
+                # Convert to RLE format
+                rle = mask_util.encode(np.asfortranarray(segment_mask))
+                rle['counts'] = rle['counts'].decode('utf-8')
+                
+                # Calculate bounding box
+                bbox = mask_util.toBbox(rle).tolist()
+                # Calculate area
+                area = int(mask_util.area(rle))
+
+
+                frame_key_no_ext = os.path.splitext(frame_key)[0]
+                if self.is_video_dataset:
+                    frame_key_no_ext = "_".join(frame_key_no_ext.rsplit("/", 1))
+                
+                # Create annotation in COCO format
+                annotation = {
+                    'id': annotation_id,  # Unique ID for this annotation
+                    'image_id': frame_key_no_ext,
+                    'category_id': cat_id,  # Original category ID
+                    'segmentation': {
+                        'size': rle['size'],
+                        'counts': rle['counts']
+                    },
+                    'area': area,
+                    'bbox': bbox,
+                    'iscrowd': 0
+                }
+                annotations.append(annotation)
+                annotation_id += 1  # Increment for next segment
+                
+            except Exception as e:
+                print(f"Warning: Failed to convert segment {seg['id']} to RLE: {e}")
+                continue
+        
+        return annotations
 
     def get_single_segment_visualization(self, frame_key, segment_index):
         """
@@ -428,3 +531,7 @@ class PanopticDataset(BaseDataset):
             vis_img.strides[0],
             QImage.Format.Format_RGB888
         )
+
+    def get_labels(self, frame_key):
+        """Get the text labels that are shown in the visualization"""
+        return self.visualization_labels.get(frame_key, [])

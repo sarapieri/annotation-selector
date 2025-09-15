@@ -10,7 +10,7 @@ from datasets.caption_panoptic_dataset import CaptionPanopticDataset
 
 def main():
     """Main function to process all annotated folders"""
-    annotated_folders_path = "../annotated_folders/12_08"
+    annotated_folders_path = "../annotated_folders/08_09"
 
     if not os.path.exists(annotated_folders_path):
         print(f"Error: {annotated_folders_path} does not exist")
@@ -103,10 +103,8 @@ def main():
             unmatched_filenames = dataset.caption_load_summary.get('unmatched_filenames', [])
             if unmatched_filenames:
                 summary_lines.append("Unmatched caption filenames:")
-                for filename in unmatched_filenames[:20]:  # Limit to first 20 for readability
+                for filename in unmatched_filenames:  # Limit to first 20 for readability
                     summary_lines.append(f"  - {filename}")
-                if len(unmatched_filenames) > 20:
-                    summary_lines.append(f"  ... and {len(unmatched_filenames) - 20} more")
                 summary_lines.append("")
             summary_lines.append("")
         

@@ -720,7 +720,8 @@ class AnnotationSelector(QMainWindow):
             
         # Update caption button states
         has_caption = self.state.has_caption_for_frame()
-        self.edit_caption_button.setEnabled(has_caption)
+        # Always enable edit button - allow editing even when no caption exists
+        self.edit_caption_button.setEnabled(True)
         if not has_caption and self.is_editing_caption:
             self._exit_caption_edit_mode()
 
@@ -985,12 +986,7 @@ class AnnotationSelector(QMainWindow):
         """Enable editing of the current caption."""
         if not self.state.current_filename() or self.is_editing_caption:
             return
-            
-        # Check if caption editing is available
-        if not self.state.has_caption_for_frame():
-            QMessageBox.warning(self, "No Caption", "This image has no caption to edit.")
-            return
-            
+        
         # Get the current caption text without the "Caption: " prefix
         current_caption = self.caption_text.toPlainText().replace("Caption: ", "")
         
