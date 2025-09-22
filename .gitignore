@@ -24,3 +24,5 @@ verification_summary.txt
 data_process/
 processed_data*
 verification_summary*
+extraction*
+extract_binary.py

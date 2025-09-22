@@ -15,6 +15,47 @@ random.seed(42)
 np.random.seed(42)
 from pycocotools import mask as mask_util
 
+def lighten_color(color, factor=0.4):
+    """
+    Lighten an RGB color by blending it with white.
+    factor=0 -> original color
+    factor=1 -> white
+    """
+    r, g, b = color
+    r = int(r + (255 - r) * factor)
+    g = int(g + (255 - g) * factor)
+    b = int(b + (255 - b) * factor)
+    return (r, g, b)
+
+thing_colors_20 = [
+    (255, 77, 77),   # stronger pastel red
+    (255,128,  0),   # stronger pastel orange
+    (255,204,  0),   # stronger pastel yellow
+    (128,255,128),   # vivid mint green
+    ( 51,255,170),   # vivid turquoise green
+    ( 51,255,255),   # vivid aqua
+    (178, 51,255),   # vivid purple
+    ( 51,153,255),   # bright sky blue
+    (128, 77,255),   # vivid violet
+    (255, 51,204),   # vivid pink
+    (255,102,102),   # coral red
+    (255,153, 51),   # apricot
+    (255,229, 51),   # sunflower
+    (153,255,153),   # vivid light green
+    ( 77,255,187),   # seafoam bright
+    ( 77,229,229),   # teal pastel strong
+    (102,178,255),   # baby blue strong
+    (153,102,255),   # lavender vivid
+    (204,102,255),   # orchid vivid
+    (255, 51,229),   # fuchsia bright
+]
+
+
+# Repeat the 20 pastel-intense colors until we have 60
+hcl_intense = (thing_colors_20 * 3)[:60]
+# Lightened version
+hcl_light = [lighten_color(c, factor=0.5) for c in hcl_intense]
+
 class PanopticDataset(BaseDataset):
     def __init__(self, name, image_dir, ann_file, mask_dir):
         super().__init__(name)
@@ -404,6 +445,9 @@ class PanopticDataset(BaseDataset):
             meta.thing_classes = thing_classes
             meta.stuff_classes = stuff_classes
 
+        meta.thing_colors = hcl_intense  # instance objects
+        meta.stuff_colors = hcl_intense  # semantic segmentation stuff
+
         visualizer = Visualizer(np.array(image), MetadataCatalog.get(metadata_key), instance_mode=ColorMode.IMAGE)
         visualizer._default_font_size = self.font_size
         vis_output = visualizer.draw_panoptic_seg_predictions(
@@ -415,6 +459,7 @@ class PanopticDataset(BaseDataset):
         vis_img = vis_output.get_image()
         qimage = QImage(vis_img.data, vis_img.shape[1], vis_img.shape[0], vis_img.strides[0], QImage.Format.Format_RGB888)
 
+        print(frame_key)
         return QImage(image_path), qimage, id_to_label
     
     def load_image_annotation(self, frame_key, start_annotation_id):
